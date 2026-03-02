@@ -1,9 +1,10 @@
 # ==============================================================================
-# Build Script Version: 2.8 (Final)
-# Date of Creation: February 25, 2026
+# Build Script Version: 3.0 (Final) + Max Size Optimization
+# Date of Creation: March 3, 2026
 # Description: Automated build and packaging (IPK/APK) for Telemt MTProxy.
 # Features: 
 #   - Rust cross-compilation (aarch64-unknown-linux-musl)
+#   - Aggressive Cargo Profile optimizations (z, LTO, abort, etc.)
 #   - UPX binary compression (LZMA)
 #   - Appended version string (MTProxy vX.X.X) for luci-app-telemt parsing
 #   - IPK Build: 2 files (generic/cortex-a53) WITH mtime fix (0x78)
@@ -27,7 +28,7 @@ on:
       build_target:
         description: 'Enter tag (e.g., 3.0.15) or branch (main)'
         required: true
-        default: '3.0.15'
+        default: '3.1.4'
 
 jobs:
   release:
@@ -71,7 +72,22 @@ jobs:
 
       - name: Build binary with cross
         run: |
-          CARGO_PROFILE_RELEASE_STRIP=true cross build --release --target aarch64-unknown-linux-musl
+          # 1. Оптимизация по размеру (вместо скорости)
+          export CARGO_PROFILE_RELEASE_OPT_LEVEL=z
+          
+          # 2. Link Time Optimization (Fat LTO) - удаляет мертвый код между всеми зависимостями
+          export CARGO_PROFILE_RELEASE_LTO=true
+          
+          # 3. Один юнит кодогенерации - собирает медленнее, но ужимает лучше
+          export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+          
+          # 4. Отключение механизма разматывания стека при паниках (экономит ~5-10%)
+          export CARGO_PROFILE_RELEASE_PANIC=abort
+          
+          # 5. Ваш strip (уже был)
+          export CARGO_PROFILE_RELEASE_STRIP=true
+          
+          cross build --release --target aarch64-unknown-linux-musl
 
       - name: Install UPX
         run: sudo apt-get update && sudo apt-get install -y upx-ucl

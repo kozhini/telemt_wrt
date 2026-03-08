@@ -1,34 +1,29 @@
 # ==============================================================================
-# Build Script Version: 3.0 (Final) + Max Size Optimization
-# Date of Creation: March 3, 2026
-# Description: Automated build and packaging (IPK/APK) for Telemt MTProxy.
+# Build Script Version: 3.3.10 LTS (Headless + Init Scripts)
+# Description: Automated build and packaging (IPK/APK) for Headless Telemt.
 # Features: 
 #   - Rust cross-compilation (aarch64-unknown-linux-musl)
-#   - Aggressive Cargo Profile optimizations (z, LTO, abort, etc.)
+#   - Aggressive Cargo Profile optimizations (z, LTO, abort, strip)
 #   - UPX binary compression (LZMA)
-#   - Appended version string (MTProxy vX.X.X) for luci-app-telemt parsing
-#   - IPK Build: 2 files (generic/cortex-a53) WITH mtime fix (0x78)
-#   - APK Build: 2 files (generic/cortex-a53) WITHOUT mtime fix
-#   - ZERO Dependencies: Relies on luci-app-telemt or firmware for certificates
-#   - Fixed post-install banner variable interpolation
+#   - nFPM bundling: binary + /etc/init.d/telemt + /etc/config/telemt
+#   - IPK Build WITH mtime fix (0x78 avoidance for older opkg)
+#   - APK Build native OpenWrt 25+
 # ==============================================================================
 
-name: Build and Release Telemt (aarch64-musl)
+name: Build and Release Headless Telemt (aarch64-musl)
 
 on:
   push:
     tags:
-      - '3.0.1[3-9]'
-      - '3.0.[2-9]*'
-      - '3.[1-9]*'
+      - '3.3.*'
       - '[4-9]*'
   
   workflow_dispatch:
     inputs:
       build_target:
-        description: 'Enter tag (e.g., 3.0.15) or branch (main)'
+        description: 'Enter tag (e.g., 3.3.10) or branch (main)'
         required: true
-        default: '3.1.4'
+        default: '3.3.10'
 
 jobs:
   release:
@@ -49,11 +44,17 @@ jobs:
             echo "VERSION=nightly" >> $GITHUB_ENV
           fi
 
-      - name: Checkout upstream repository
+      # 1. Скачиваем текущий репозиторий (где лежат files/telemt.init и files/telemt.config)
+      - name: Checkout local repository
+        uses: actions/checkout@v4
+
+      # 2. Скачиваем исходники Rust-бинарника в подпапку upstream_src
+      - name: Checkout upstream repository (Telemt source)
         uses: actions/checkout@v4
         with:
           repository: 'telemt/telemt'
           ref: ${{ env.VERSION }}
+          path: 'upstream_src'
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -72,19 +73,13 @@ jobs:
 
       - name: Build binary with cross
         run: |
-          # 1. Оптимизация по размеру (вместо скорости)
+          # Переходим в папку с исходниками Rust
+          cd upstream_src
+          
           export CARGO_PROFILE_RELEASE_OPT_LEVEL=z
-          
-          # 2. Link Time Optimization (Fat LTO) - удаляет мертвый код между всеми зависимостями
           export CARGO_PROFILE_RELEASE_LTO=true
-          
-          # 3. Один юнит кодогенерации - собирает медленнее, но ужимает лучше
           export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-          
-          # 4. Отключение механизма разматывания стека при паниках (экономит ~5-10%)
           export CARGO_PROFILE_RELEASE_PANIC=abort
-          
-          # 5. Ваш strip (уже был)
           export CARGO_PROFILE_RELEASE_STRIP=true
           
           cross build --release --target aarch64-unknown-linux-musl
@@ -94,35 +89,35 @@ jobs:
 
       - name: Compress with UPX
         run: |
-          upx --best --lzma target/aarch64-unknown-linux-musl/release/telemt
+          upx --best --lzma upstream_src/target/aarch64-unknown-linux-musl/release/telemt
 
-      - name: Append version string
+      - name: Append version string & Move binary
         run: |
-          echo -n "MTProxy v${{ env.VERSION }}" >> target/aarch64-unknown-linux-musl/release/telemt
-          mv target/aarch64-unknown-linux-musl/release/telemt telemt-aarch64-musl
+          echo -n "MTProxy v${{ env.VERSION }}" >> upstream_src/target/aarch64-unknown-linux-musl/release/telemt
+          # Перемещаем готовый бинарник в корень для упаковки
+          mv upstream_src/target/aarch64-unknown-linux-musl/release/telemt telemt-aarch64-musl
 
       - name: Build IPK and APK packages with nFPM
         run: |
           export PKG_VER="${{ env.VERSION }}"
           ARCHS=("aarch64_generic" "aarch64_cortex-a53")
           
-          # Create post-install script once (removed backslash before PKG_VER)
+          # Скрипт post-install (сразу включаем службу в автозагрузку)
           cat > postinst.sh <<EOF
           #!/bin/sh
           echo ""
           echo "================================================================="
-          echo " Installed telemt static executable version ${PKG_VER}"
-          echo " "
-          echo " To configure it, you need the following package:"
-          echo " https://github.com/Medvedolog/luci-app-telemt"
+          echo " Installed Headless Telemt version \${PKG_VER}"
+          echo " Daemon configuration: /etc/config/telemt"
+          echo " To manage via WebUI, install: luci-app-telemt"
           echo "================================================================="
-          echo ""
+          /etc/init.d/telemt enable
           exit 0
           EOF
           chmod 755 postinst.sh
 
           # ------------------------------------------------------------------
-          # 1. Build IPKs - WITH mtime fix (Saves older opkg from 0x78 errors)
+          # 1. Build IPKs
           # ------------------------------------------------------------------
           export SOURCE_DATE_EPOCH=1704067200
           for ARCH in "${ARCHS[@]}"; do
@@ -133,13 +128,24 @@ jobs:
           arch: $PKG_ARCH
           platform: linux
           version: $PKG_VER
-          maintainer: Community
-          description: Telemt MTProxy static binary (Built for $PKG_ARCH)
+          maintainer: Telemt Team
+          description: Headless Telemt MTProxy (Core + Init Scripts)
           contents:
             - src: ./telemt-aarch64-musl
               dst: /usr/bin/telemt
               file_info:
                 mode: 0755
+                mtime: 2024-01-01T00:00:00Z
+            - src: ./files/telemt.init
+              dst: /etc/init.d/telemt
+              file_info:
+                mode: 0755
+                mtime: 2024-01-01T00:00:00Z
+            - src: ./files/telemt.config
+              dst: /etc/config/telemt
+              type: config
+              file_info:
+                mode: 0644
                 mtime: 2024-01-01T00:00:00Z
           scripts:
             postinstall: ./postinst.sh
@@ -148,7 +154,7 @@ jobs:
           done
 
           # ------------------------------------------------------------------
-          # 2. Build APKs - WITHOUT mtime fix (Native OpenWrt 25 apk format)
+          # 2. Build APKs
           # ------------------------------------------------------------------
           unset SOURCE_DATE_EPOCH
           for ARCH in "${ARCHS[@]}"; do
@@ -159,13 +165,22 @@ jobs:
           arch: $PKG_ARCH
           platform: linux
           version: $PKG_VER
-          maintainer: Community
-          description: Telemt MTProxy static binary (Built for $PKG_ARCH)
+          maintainer: Telemt Team
+          description: Headless Telemt MTProxy (Core + Init Scripts)
           contents:
             - src: ./telemt-aarch64-musl
               dst: /usr/bin/telemt
               file_info:
                 mode: 0755
+            - src: ./files/telemt.init
+              dst: /etc/init.d/telemt
+              file_info:
+                mode: 0755
+            - src: ./files/telemt.config
+              dst: /etc/config/telemt
+              type: config
+              file_info:
+                mode: 0644
           scripts:
             postinstall: ./postinst.sh
           EOF
@@ -182,5 +197,5 @@ jobs:
             *.apk
           name: Release ${{ env.VERSION }}
           tag_name: ${{ env.VERSION }}
-          prerelease: ${{ env.VERSION == 'main' || env.VERSION == 'master' }}
+          prerelease: false
           draft: false

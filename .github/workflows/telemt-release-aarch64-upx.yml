@@ -54,12 +54,15 @@ jobs:
 
       - name: Install cross and nFPM
         run: |
-          curl -sL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-musl.tar.gz | tar -xz
+          # 1. Reliable cross installation (via API, we get the exact tag, bypassing redirects)
+          CROSS_TAG=$(curl -sL https://api.github.com/repos/cross-rs/cross/releases/latest | jq -r .tag_name)
+          curl -sSfL "https://github.com/cross-rs/cross/releases/download/${CROSS_TAG}/cross-x86_64-unknown-linux-musl.tar.gz" | tar -xz
           sudo mv cross /usr/local/bin/
           
+          # 2. Reliable nFPM installation
           NFPM_TAG=$(curl -sL https://api.github.com/repos/goreleaser/nfpm/releases/latest | jq -r .tag_name)
           NFPM_VER=${NFPM_TAG#v}
-          curl -sL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_TAG}/nfpm_${NFPM_VER}_Linux_x86_64.tar.gz" | tar -xz
+          curl -sSfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_TAG}/nfpm_${NFPM_VER}_Linux_x86_64.tar.gz" | tar -xz
           sudo mv nfpm /usr/local/bin/
 
       - name: Build binary with cross

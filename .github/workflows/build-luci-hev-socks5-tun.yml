@@ -1,4 +1,4 @@
-name: Build and Release LuCI App for HEV SOCKS5 Tunnel v3
+name: Build and Release LuCI App for HEV SOCKS5 Tunnel v4
 
 on:
   push:
@@ -207,22 +207,48 @@ jobs:
               /usr/libexec/luci-hev-socks5-tunnel-render
           }
 
+          backend_missing() {
+              [ -x /etc/init.d/hev-socks5-tunnel ] || return 0
+              return 1
+          }
+
           case "$ACTION" in
               start)
+                  if backend_missing; then
+                      echo "Backend package 'hev-socks5-tunnel' is missing."
+                      echo "Run:"
+                      echo "  opkg update"
+                      echo "  opkg install hev-socks5-tunnel"
+                      exit 1
+                  fi
                   render
                   /etc/init.d/hev-socks5-tunnel start
                   /etc/init.d/luci-hev-socks5-tunnel-route restart || true
               ;;
               stop)
                   /etc/init.d/luci-hev-socks5-tunnel-route stop || true
-                  /etc/init.d/hev-socks5-tunnel stop
+                  [ -x /etc/init.d/hev-socks5-tunnel ] && /etc/init.d/hev-socks5-tunnel stop || true
               ;;
               restart)
+                  if backend_missing; then
+                      echo "Backend package 'hev-socks5-tunnel' is missing."
+                      echo "Run:"
+                      echo "  opkg update"
+                      echo "  opkg install hev-socks5-tunnel"
+                      exit 1
+                  fi
                   render
                   /etc/init.d/hev-socks5-tunnel restart
                   /etc/init.d/luci-hev-socks5-tunnel-route restart || true
               ;;
               reload)
+                  if backend_missing; then
+                      echo "Backend package 'hev-socks5-tunnel' is missing."
+                      echo "Run:"
+                      echo "  opkg update"
+                      echo "  opkg install hev-socks5-tunnel"
+                      exit 1
+                  fi
                   render
                   /etc/init.d/hev-socks5-tunnel reload || /etc/init.d/hev-socks5-tunnel restart
                   /etc/init.d/luci-hev-socks5-tunnel-route restart || true
@@ -231,7 +257,7 @@ jobs:
                   render
               ;;
               status)
-                  /etc/init.d/hev-socks5-tunnel status || true
+                  [ -x /etc/init.d/hev-socks5-tunnel ] && /etc/init.d/hev-socks5-tunnel status || true
               ;;
               *)
                   echo "Unsupported action: $ACTION" >&2
@@ -485,7 +511,8 @@ jobs:
                   "/etc/hev-socks5-tunnel/main.yml": [ "read", "write" ],
                   "/usr/libexec/luci-hev-socks5-tunnel-render": [ "exec" ],
                   "/usr/libexec/luci-hev-socks5-tunnel-ctl": [ "exec" ],
-                  "/sbin/logread": [ "exec" ]
+                  "/sbin/logread": [ "exec" ],
+                  "/etc/init.d/hev-socks5-tunnel": [ "stat" ]
                 }
               },
               "write": {
@@ -551,10 +578,12 @@ jobs:
               _actionNode: null,
               _buttons: [],
               _pollRegistered: false,
+              _backendPresent: false,
 
               load: function() {
                   return Promise.all([
-                      uci.load('luci-hev-socks5-tunnel')
+                      uci.load('luci-hev-socks5-tunnel'),
+                      L.resolveDefault(fs.stat('/etc/init.d/hev-socks5-tunnel'), null)
                   ]);
               },
 
@@ -605,6 +634,19 @@ jobs:
                   });
               },
 
+              renderBackendWarning: function() {
+                  if (this._backendPresent)
+                      return '';
+
+                  return [
+                      '<div style="margin-bottom:12px;padding:12px;border:1px solid #fca5a5;border-radius:10px;background:#fef2f2;color:#991b1b">',
+                      '<strong>' + _('Backend package missing') + '</strong><br/>',
+                      _('This LuCI app requires the official hev-socks5-tunnel package to be installed separately.') + '<br/><br/>',
+                      '<code>opkg update<br/>opkg install hev-socks5-tunnel</code>',
+                      '</div>'
+                  ].join('');
+              },
+
               renderStatusHtml: function(runtime) {
                   var state = runtime.state;
                   var tunObj = runtime.tun;
@@ -612,6 +654,7 @@ jobs:
                   var tunText = tunObj ? _('Present') : _('Missing');
 
                   return [
+                      this.renderBackendWarning(),
                       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;align-items:stretch">',
                         '<div style="padding:10px;border:1px solid #d1d5db;border-radius:10px;background:#fff">',
                           '<div style="font-size:12px;color:#6b7280;margin-bottom:6px">' + _('HEV daemon') + '</div>',
@@ -725,9 +768,11 @@ jobs:
                   }, this));
               },
 
-              render: function() {
+              render: function(loadData) {
                   var m, s, o;
                   var self = this;
+
+                  this._backendPresent = !!loadData[1];
 
                   m = new form.Map('luci-hev-socks5-tunnel', _('HEV SOCKS5 Tunnel'),
                       _('LuCI front-end for the official hev-socks5-tunnel package. This page stores rich settings in UCI, renders a readable YAML file for the daemon, and controls the official OpenWrt service.'));
@@ -969,6 +1014,18 @@ jobs:
 
           cat > postinst.sh <<'EOF'
           #!/bin/sh
+          echo "=============================================="
+          echo "luci-app-hev-socks5-tunnel installed."
+          echo
+          echo "Backend daemon package is NOT bundled."
+          echo "Please install it first if it is missing:"
+          echo
+          echo "  opkg update"
+          echo "  opkg install hev-socks5-tunnel"
+          echo
+          echo "Then reopen LuCI and configure the service."
+          echo "=============================================="
+
           /etc/init.d/luci-hev-socks5-tunnel-route enable 2>/dev/null || true
           /usr/libexec/luci-hev-socks5-tunnel-render >/dev/null 2>&1 || true
           /etc/init.d/rpcd reload 2>/dev/null || true
@@ -1022,10 +1079,6 @@ jobs:
           scripts:
             postinstall: ./postinst.sh
             preremove: ./prerm.sh
-          overrides:
-            ipk:
-              fields:
-                Depends: "hev-socks5-tunnel, luci-base, rpcd, rpcd-mod-file, ip-full"
           EOF
             nfpm package --config nfpm_ipk.yaml --packager ipk --target "${PKG_NAME}_${PKG_VER}_${ARCH}.ipk"
           done
@@ -1064,10 +1117,6 @@ jobs:
           scripts:
             postinstall: ./postinst.sh
             preremove: ./prerm.sh
-          overrides:
-            apk:
-              fields:
-                depends: "hev-socks5-tunnel, luci-base, rpcd, rpcd-mod-file, ip-full"
           EOF
             nfpm package --config nfpm_apk.yaml --packager apk --target "${PKG_NAME}_${PKG_VER}_${ARCH}.apk"
           done

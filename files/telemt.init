@@ -1,12 +1,15 @@
 #!/bin/sh /etc/rc.common
 # ==============================================================================
 # Telemt MTProxy Service Management Script
-# Version: 3.3.16-5 (Strict Clean State, Robust Version, Precise Kill)
+# Version: 3.3.16-6 (Canonical Config Path, Deep Diagnostics, Smart Ver)
 # ==============================================================================
 START=99
 STOP=10
 USE_PROCD=1
-CONF=/var/etc/telemt.toml
+
+# CANONICAL PATHS
+CONF=/tmp/etc/telemt.toml
+VER_FILE=/tmp/etc/telemt.version
 
 extra_command "run_save_stats" "Force dump prometheus metrics to RAM before shutdown"
 
@@ -85,16 +88,17 @@ run_save_stats() {
 generate_toml() {
     local target_file="$1"
     
-    # 1. PURGE LEGACY CONFIGS to prevent State Desync
+    # Force pure state
+    mkdir -p /tmp/etc /var/etc
     rm -f /var/etc/telemt.toml /tmp/etc/telemt.toml
     
-    local TMP_LINKS=$(mktemp /tmp/telemt_links.XXXXXX)
-    local TMP_USERS=$(mktemp /tmp/telemt_users.XXXXXX)
-    local TMP_CONNS=$(mktemp /tmp/telemt_conns.XXXXXX)
-    local TMP_IPS=$(mktemp /tmp/telemt_ips.XXXXXX)
-    local TMP_QUOTA=$(mktemp /tmp/telemt_quota.XXXXXX)
-    local TMP_EXP=$(mktemp /tmp/telemt_exp.XXXXXX)
-    local TMP_CONF=$(mktemp /var/etc/telemt.toml.XXXXXX)
+    local TMP_LINKS=$(mktemp /tmp/etc/telemt_links.XXXXXX)
+    local TMP_USERS=$(mktemp /tmp/etc/telemt_users.XXXXXX)
+    local TMP_CONNS=$(mktemp /tmp/etc/telemt_conns.XXXXXX)
+    local TMP_IPS=$(mktemp /tmp/etc/telemt_ips.XXXXXX)
+    local TMP_QUOTA=$(mktemp /tmp/etc/telemt_quota.XXXXXX)
+    local TMP_EXP=$(mktemp /tmp/etc/telemt_exp.XXXXXX)
+    local TMP_CONF=$(mktemp /tmp/etc/telemt.toml.XXXXXX)
     
     cleanup_tmp() { rm -f "$TMP_LINKS" "$TMP_USERS" "$TMP_CONNS" "$TMP_IPS" "$TMP_QUOTA" "$TMP_EXP" "$TMP_CONF"; }
 
@@ -156,7 +160,6 @@ generate_toml() {
     config_get_bool use_mp general use_middle_proxy 0
     config_get_bool use_stun general use_stun 0
     
-    # Only pull ME config if use_mp is enabled
     if [ "$use_mp" -eq 1 ]; then
         config_get me_pool_size general me_pool_size "16"
         config_get me_warm_standby general me_warm_standby "8"
@@ -252,7 +255,7 @@ use_middle_proxy = $mp_str
 log_level = "$log_level"
 TOML
 
-    # 2. Strict omission of ME config if disabled
+    # Strict omission of ME config if disabled to prevent fallback loops
     if [ "$use_mp" -eq 1 ]; then
         [ -n "$ad_tag" ] && echo "ad_tag = \"$ad_tag\"" >> "$TMP_CONF"
         cat <<TOML >> "$TMP_CONF"
@@ -439,19 +442,18 @@ start_service() {
         return 1
     fi
     
-    # 4. ROBUST VERSION DETECTION
-    mkdir -p /var/etc
+    mkdir -p /tmp/etc /var/etc
+    
+    # Smart Version detection (Waterfall)
     local ver=""
-    ver=$("$PROG" -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-    if [ -z "$ver" ] && command -v strings >/dev/null 2>&1; then
-        ver=$(strings "$PROG" 2>/dev/null | grep -iE '^MTProxy v' | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    fi
-    if [ -z "$ver" ]; then
-        ver=$(grep -a -m 1 -ioE 'MTProxy v[0-9]+\.[0-9]+\.[0-9]+' "$PROG" 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    fi
+    ver=$("$PROG" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+    [ -z "$ver" ] && ver=$("$PROG" -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+    [ -z "$ver" ] && command -v strings >/dev/null 2>&1 && ver=$(strings "$PROG" 2>/dev/null | grep -iE '^MTProxy v' | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    [ -z "$ver" ] && ver=$(grep -a -m 1 -ioE 'MTProxy v[0-9]+\.[0-9]+\.[0-9]+' "$PROG" 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    
     if [ -n "$ver" ]; then 
-        echo "$ver" > /var/etc/telemt.version
-        chmod 644 /var/etc/telemt.version
+        echo "$ver" > "$VER_FILE"
+        chmod 644 "$VER_FILE"
     fi
 
     if ! generate_toml "$CONF"; then
@@ -459,6 +461,14 @@ start_service() {
         return 1
     fi
     chmod 600 "$CONF"
+    
+    # Explicit debugging tracer
+    logger -t telemt "Init: using config $CONF"
+    if grep -q '^use_middle_proxy = true' "$CONF"; then
+        logger -t telemt "Init: TOML says ME=ON"
+    else
+        logger -t telemt "Init: TOML says ME=OFF"
+    fi
     
     local port auto_fw
     config_get port general port "8443"
@@ -500,7 +510,7 @@ reload_service() {
         return 0
     fi
     
-    local NEW_CONF="/tmp/telemt.toml.new"
+    local NEW_CONF="/tmp/etc/telemt.toml.new"
     if ! generate_toml "$NEW_CONF"; then
         logger -t telemt "Init: TOML generation failed. Aborting reload."
         rm -f "$NEW_CONF"
@@ -508,10 +518,10 @@ reload_service() {
     fi
     chmod 600 "$NEW_CONF"
     
-    sed -n '1,/^# --- DYNAMIC CONFIG ---/p' "$CONF" 2>/dev/null > /tmp/telemt_core.old
-    sed -n '1,/^# --- DYNAMIC CONFIG ---/p' "$NEW_CONF" > /tmp/telemt_core.new
+    sed -n '1,/^# --- DYNAMIC CONFIG ---/p' "$CONF" 2>/dev/null > /tmp/etc/telemt_core.old
+    sed -n '1,/^# --- DYNAMIC CONFIG ---/p' "$NEW_CONF" > /tmp/etc/telemt_core.new
     
-    if cmp -s /tmp/telemt_core.old /tmp/telemt_core.new; then
+    if cmp -s /tmp/etc/telemt_core.old /tmp/etc/telemt_core.new; then
         mv "$NEW_CONF" "$CONF"
         logger -t telemt "WebUI: Users/Upstreams updated. Executed Hot-Reload (no connections dropped)."
     else
@@ -520,17 +530,19 @@ reload_service() {
         restart
     fi
     
-    rm -f /tmp/telemt_core.old /tmp/telemt_core.new
+    rm -f /tmp/etc/telemt_core.old /tmp/etc/telemt_core.new
 }
 
 stop_service() {
     [ "$TELEMT_NO_SAVE" != "1" ] && run_save_stats
     
-    # 5. PRECISE AND BRUTAL KILL (No zombies, no collateral damage)
+    # Graceful Process Termination
     for p in $(pidof telemt 2>/dev/null); do
         local comm=$(cat "/proc/$p/comm" 2>/dev/null)
         if [ "$comm" = "telemt" ]; then
-            kill -9 "$p" 2>/dev/null
+            kill -TERM "$p" 2>/dev/null
+            sleep 1
+            kill -KILL "$p" 2>/dev/null
         fi
     done
 }

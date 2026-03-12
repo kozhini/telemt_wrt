@@ -1,4 +1,4 @@
-name: Build and Release LuCI App for HEV SOCKS5 Tunnel v1
+name: Build and Release LuCI App for HEV SOCKS5 Tunnel v2
 
 on:
   push:
@@ -6,54 +6,44 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Package version override'
+      build_target:
+        description: 'Enter package version (e.g. 0.1.0) or branch label'
         required: true
-        default: '0.1.0'
+        default: '2.14.4'
 
 jobs:
   release:
-    name: Build LuCI Package
+    name: Build and Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
-    env:
-      PKG_NAME: luci-app-hev-socks5-tunnel
-
     steps:
-      - name: Resolve Version Metadata
-        shell: bash
+      - name: Extract version
+        id: vars
         run: |
-          set -euo pipefail
-
-          REF_RAW="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}"
-          VERSION="${REF_RAW#v}"
-
-          if [[ -z "${VERSION}" || "${VERSION}" == "main" || "${VERSION}" == "master" ]]; then
-            VERSION="0.1.0-dev.${GITHUB_RUN_NUMBER}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "VERSION=${{ github.event.inputs.build_target }}" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          else
+            echo "VERSION=nightly" >> $GITHUB_ENV
           fi
 
-          RELEASE_TAG="luci-hev-socks5-tunnel-${VERSION}-${GITHUB_RUN_NUMBER}"
+      - name: Checkout local repository
+        uses: actions/checkout@v4
 
-          {
-            echo "VERSION=${VERSION}"
-            echo "RELEASE_TAG=${RELEASE_TAG}"
-          } >> "$GITHUB_ENV"
-
-      - name: Install Packaging Tools
-        shell: bash
+      - name: Install nFPM and helpers
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y dos2unix curl tar xz-utils
+          sudo apt-get install -y dos2unix curl tar xz-utils jq
 
           NFPM_VER="2.43.1"
           curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VER}/nfpm_${NFPM_VER}_Linux_x86_64.tar.gz" | tar -xz
           sudo install -m 0755 nfpm /usr/local/bin/nfpm
 
-      - name: Generate Package Files
-        shell: bash
+      - name: Generate LuCI package files
         run: |
           set -euxo pipefail
 
@@ -93,6 +83,8 @@ jobs:
           #!/bin/sh
           set -eu
 
+          . /lib/functions.sh
+
           UI_CFG="luci-hev-socks5-tunnel"
           OUT_DIR="/etc/hev-socks5-tunnel"
           OUT_FILE="${OUT_DIR}/main.yml"
@@ -103,25 +95,6 @@ jobs:
 
           is_hostname() {
               echo "$1" | grep -Eq '^[A-Za-z0-9._:-]+$'
-          }
-
-          is_ipv4_cidr() {
-              local v="$1"
-              local ip mask
-
-              case "$v" in
-                  */*)
-                      ip="${v%/*}"
-                      mask="${v#*/}"
-                      is_ipv4 "$ip" || return 1
-                      echo "$mask" | grep -Eq '^(3[0-2]|[12]?[0-9])$' || return 1
-                      return 0
-                  ;;
-                  *)
-                      is_ipv4 "$v"
-                      return $?
-                  ;;
-              esac
           }
 
           json_escape() {
@@ -270,6 +243,8 @@ jobs:
           START=96
           STOP=15
 
+          . /lib/functions.sh
+
           UI_CFG="luci-hev-socks5-tunnel"
           TUN_IF_DEFAULT="tun0"
 
@@ -373,7 +348,6 @@ jobs:
               local entry="$1"
               local tun_if
               config_get tun_if config tunnel_name "$TUN_IF_DEFAULT"
-
               is_ipv4_cidr "$entry" || return 0
               ip route replace "$entry" dev "$tun_if" 2>/dev/null || true
           }
@@ -386,7 +360,6 @@ jobs:
               local entry="$1"
               local tun_if
               config_get tun_if config tunnel_name "$TUN_IF_DEFAULT"
-
               is_ipv4_cidr "$entry" || return 0
               ip route del "$entry" dev "$tun_if" 2>/dev/null || true
           }
@@ -506,7 +479,6 @@ jobs:
                 "file": {
                   "/sys/class/net/tun0": [ "stat" ],
                   "/proc/meminfo": [ "read" ],
-                  "/proc/%": [ "read" ],
                   "/etc/hev-socks5-tunnel/main.yml": [ "read", "write" ],
                   "/usr/libexec/luci-hev-socks5-tunnel-render": [ "exec" ],
                   "/usr/libexec/luci-hev-socks5-tunnel-ctl": [ "exec" ],
@@ -517,10 +489,7 @@ jobs:
                 "uci": [
                   "luci-hev-socks5-tunnel",
                   "hev-socks5-tunnel"
-                ],
-                "ubus": {
-                  "luci": [ "setInitAction" ]
-                }
+                ]
               }
             }
           }
@@ -550,10 +519,8 @@ jobs:
           function isValidIPv4CIDR(s) {
               var v = String(s || '');
               var m = v.match(/^(.+)\/(\d{1,2})$/);
-
               if (!m)
                   return isValidIPv4(v);
-
               return isValidIPv4(m[1]) && (+m[2] >= 0 && +m[2] <= 32);
           }
 
@@ -620,10 +587,7 @@ jobs:
                       var running = first.running === true || !!pid;
 
                       return Promise.all([
-                          Promise.resolve({
-                              running: running,
-                              pid: pid
-                          }),
+                          Promise.resolve({ running: running, pid: pid }),
                           Promise.resolve(res[2]),
                           this.readProcStatusValue(pid, 'VmRSS'),
                           Promise.resolve(res[3])
@@ -704,9 +668,8 @@ jobs:
                       this._actionNode.textContent = text || '';
 
                   this._buttons.forEach(function(btn) {
-                      if (!btn)
-                          return;
-                      btn.disabled = !!busy;
+                      if (btn)
+                          btn.disabled = !!busy;
                   });
               },
 
@@ -841,7 +804,6 @@ jobs:
 
                   o = s.option(form.Value, 'username', _('Username'),
                       _('Optional username for SOCKS5 authentication.'));
-                  o.password = false;
                   o.rmempty = true;
 
                   o = s.option(form.Value, 'password', _('Password'),
@@ -897,15 +859,12 @@ jobs:
                   o.rmempty = true;
                   o.validate = function(section_id, value) {
                       var list = Array.isArray(value) ? value : [ value ];
-                      var i;
-
-                      for (i = 0; i < list.length; i++) {
+                      for (var i = 0; i < list.length; i++) {
                           if (String(list[i] || '').length === 0)
                               continue;
                           if (!isValidIPv4CIDR(list[i]))
                               return _('Each entry must be a valid IPv4 address or IPv4 CIDR subnet.');
                       }
-
                       return true;
                   };
 
@@ -915,15 +874,12 @@ jobs:
                   o.rmempty = true;
                   o.validate = function(section_id, value) {
                       var list = Array.isArray(value) ? value : [ value ];
-                      var i;
-
-                      for (i = 0; i < list.length; i++) {
+                      for (var i = 0; i < list.length; i++) {
                           if (String(list[i] || '').length === 0)
                               continue;
                           if (!isValidIPv4CIDR(list[i]))
                               return _('Each entry must be a valid IPv4 address or IPv4 CIDR subnet.');
                       }
-
                       return true;
                   };
 
@@ -1001,41 +957,31 @@ jobs:
             "${PKGROOT}/usr/share/rpcd/acl.d/luci-app-hev-socks5-tunnel.json" \
             "${PKGROOT}/www/luci-static/resources/view/hev-socks5-tunnel/config.js"
 
-      - name: Create nFPM config and package
-        shell: bash
+      - name: Build IPK and APK packages with nFPM
         run: |
           set -euxo pipefail
 
-          mkdir -p packaging
-
-          cat > packaging/postinstall.sh <<'EOF'
-          #!/bin/sh
-          set -e
-
-          [ -n "${IPKG_INSTROOT}" ] && exit 0
-
-          /etc/init.d/luci-hev-socks5-tunnel-route enable >/dev/null 2>&1 || true
-          /usr/libexec/luci-hev-socks5-tunnel-render >/dev/null 2>&1 || true
-          /etc/init.d/rpcd reload >/dev/null 2>&1 || true
-          rm -f /tmp/luci-indexcache /tmp/luci-modulecache
-          exit 0
-          EOF
-
-          cat > packaging/preremove.sh <<'EOF'
-          #!/bin/sh
-          set -e
-
-          [ -n "${IPKG_INSTROOT}" ] && exit 0
-
-          /etc/init.d/luci-hev-socks5-tunnel-route stop >/dev/null 2>&1 || true
-          /etc/init.d/luci-hev-socks5-tunnel-route disable >/dev/null 2>&1 || true
-          rm -f /tmp/luci-indexcache /tmp/luci-modulecache
-          exit 0
-          EOF
-
-          chmod 0755 packaging/postinstall.sh packaging/preremove.sh
-
+          export PKG_VER="${{ env.VERSION }}"
           ARCHS=("aarch64_generic" "aarch64_cortex-a53")
+
+          cat > postinst.sh <<EOF
+          #!/bin/sh
+          /etc/init.d/luci-hev-socks5-tunnel-route enable 2>/dev/null || true
+          /usr/libexec/luci-hev-socks5-tunnel-render >/dev/null 2>&1 || true
+          /etc/init.d/rpcd reload 2>/dev/null || true
+          rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+          exit 0
+          EOF
+
+          cat > prerm.sh <<EOF
+          #!/bin/sh
+          /etc/init.d/luci-hev-socks5-tunnel-route stop 2>/dev/null || true
+          /etc/init.d/luci-hev-socks5-tunnel-route disable 2>/dev/null || true
+          exit 0
+          EOF
+
+          chmod 755 postinst.sh prerm.sh
+
           export PKG_DESC="LuCI front-end for the official hev-socks5-tunnel package with YAML rendering, status dashboard and route helper."
 
           export SOURCE_DATE_EPOCH=1704067200
@@ -1044,60 +990,41 @@ jobs:
           name: ${PKG_NAME}
           arch: ${ARCH}
           platform: linux
-          version: ${VERSION}
-          section: net
-          priority: optional
-          maintainer: Arikusey
+          version: ${PKG_VER}
+          maintainer: HEV / OpenWrt integration
           description: "${PKG_DESC}"
           homepage: https://github.com/heiher/hev-socks5-tunnel
-          license: MIT
-
-          depends:
-            - hev-socks5-tunnel
-            - luci-base
-            - rpcd
-            - rpcd-mod-file
-            - uci
-            - ip-full
-
           contents:
-            - src: ./pkgroot/etc/config/
-              dst: /etc/config
-              type: tree
-
             - src: ./pkgroot/etc/init.d/
               dst: /etc/init.d
               type: tree
-
             - src: ./pkgroot/usr/libexec/
               dst: /usr/libexec
               type: tree
-
             - src: ./pkgroot/usr/share/luci/menu.d/
               dst: /usr/share/luci/menu.d
               type: tree
-
             - src: ./pkgroot/usr/share/rpcd/acl.d/
               dst: /usr/share/rpcd/acl.d
               type: tree
-
             - src: ./pkgroot/www/luci-static/resources/view/hev-socks5-tunnel/
               dst: /www/luci-static/resources/view/hev-socks5-tunnel
               type: tree
-
             - src: ./pkgroot/etc/config/luci-hev-socks5-tunnel
               dst: /etc/config/luci-hev-socks5-tunnel
               type: config|noreplace
               file_info:
                 mode: 0644
                 mtime: 2024-01-01T00:00:00Z
-
           scripts:
-            postinstall: ./packaging/postinstall.sh
-            preremove: ./packaging/preremove.sh
+            postinstall: ./postinst.sh
+            preremove: ./prerm.sh
+          overrides:
+            ipk:
+              fields:
+                Depends: "hev-socks5-tunnel, luci-base, rpcd, rpcd-mod-file, uci, ip-full"
           EOF
-
-            nfpm package --config nfpm_ipk.yaml --packager ipk --target "${PKG_NAME}_${VERSION}_${ARCH}.ipk"
+            nfpm package --config nfpm_ipk.yaml --packager ipk --target "${PKG_NAME}_${PKG_VER}_${ARCH}.ipk"
           done
 
           unset SOURCE_DATE_EPOCH
@@ -1106,76 +1033,50 @@ jobs:
           name: ${PKG_NAME}
           arch: ${ARCH}
           platform: linux
-          version: ${VERSION}
-          section: net
-          priority: optional
-          maintainer: Arikusey
+          version: ${PKG_VER}
+          maintainer: HEV / OpenWrt integration
           description: "${PKG_DESC}"
           homepage: https://github.com/heiher/hev-socks5-tunnel
-          license: MIT
-
-          depends:
-            - hev-socks5-tunnel
-            - luci-base
-            - rpcd
-            - rpcd-mod-file
-            - uci
-            - ip-full
-
           contents:
-            - src: ./pkgroot/etc/config/
-              dst: /etc/config
-              type: tree
-
             - src: ./pkgroot/etc/init.d/
               dst: /etc/init.d
               type: tree
-
             - src: ./pkgroot/usr/libexec/
               dst: /usr/libexec
               type: tree
-
             - src: ./pkgroot/usr/share/luci/menu.d/
               dst: /usr/share/luci/menu.d
               type: tree
-
             - src: ./pkgroot/usr/share/rpcd/acl.d/
               dst: /usr/share/rpcd/acl.d
               type: tree
-
             - src: ./pkgroot/www/luci-static/resources/view/hev-socks5-tunnel/
               dst: /www/luci-static/resources/view/hev-socks5-tunnel
               type: tree
-
             - src: ./pkgroot/etc/config/luci-hev-socks5-tunnel
               dst: /etc/config/luci-hev-socks5-tunnel
               type: config|noreplace
               file_info:
                 mode: 0644
-
           scripts:
-            postinstall: ./packaging/postinstall.sh
-            preremove: ./packaging/preremove.sh
+            postinstall: ./postinst.sh
+            preremove: ./prerm.sh
+          overrides:
+            apk:
+              fields:
+                depends: "hev-socks5-tunnel, luci-base, rpcd, rpcd-mod-file, uci, ip-full"
           EOF
-
-            nfpm package --config nfpm_apk.yaml --packager apk --target "${PKG_NAME}_${VERSION}_${ARCH}.apk"
+            nfpm package --config nfpm_apk.yaml --packager apk --target "${PKG_NAME}_${PKG_VER}_${ARCH}.apk"
           done
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: hev-socks5-tunnel-luci-${{ env.VERSION }}
-          path: |
-            *.ipk
-            *.apk
-
-      - name: GitHub Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: LuCI HEV SOCKS5 Tunnel ${{ env.VERSION }}
           files: |
             *.ipk
             *.apk
-          draft: false
+          name: Release ${{ env.VERSION }}
+          tag_name: ${{ env.VERSION }}
           prerelease: false
+          draft: false

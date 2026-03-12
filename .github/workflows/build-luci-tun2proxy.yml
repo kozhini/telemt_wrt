@@ -1,9 +1,3 @@
-# ==============================================================================
-# Build Script: luci-app-tun2proxy (AIO Senior Edition)
-# Version: 1.0.0
-# Targets: aarch64-unknown-linux-musl (OpenWrt/Alpine)
-# ==============================================================================
-
 name: Build and Release Tun2Proxy (AIO)
 
 on:
@@ -13,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Target Version (e.g. v0.5.1 or branch name)'
+        description: 'Git ref to build (tag, branch or commit SHA)'
         required: true
-        default: 'main'
+        default: 'master'
 
 jobs:
   release:
@@ -24,223 +18,814 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      TARGET: aarch64-unknown-linux-musl
+      PKG_NAME: luci-app-tun2proxy
+      TUN_NAME: tun0
+
     steps:
       - name: Checkout Source (tun2proxy)
         uses: actions/checkout@v4
         with:
-          repository: 'tun2proxy/tun2proxy'
+          repository: tun2proxy/tun2proxy
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
-          path: 'src'
+          path: src
+          fetch-depth: 1
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
       - name: Install System Dependencies
+        shell: bash
         run: |
-          sudo apt-get update && sudo apt-get install -y upx-ucl dos2unix jq
-          
-          # Install cross-rs
-          CROSS_TAG=$(curl -sL https://api.github.com/repos/cross-rs/cross/releases/latest | jq -r .tag_name)
-          curl -sSfL "https://github.com/cross-rs/cross/releases/download/${CROSS_TAG}/cross-x86_64-unknown-linux-musl.tar.gz" | tar -xz
-          sudo mv cross /usr/local/bin/
-          
-          # Install nFPM
-          NFPM_TAG=$(curl -sL https://api.github.com/repos/goreleaser/nfpm/releases/latest | jq -r .tag_name)
-          NFPM_VER=${NFPM_TAG#v}
-          curl -sSfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_TAG}/nfpm_${NFPM_VER}_Linux_x86_64.tar.gz" | tar -xz
-          sudo mv nfpm /usr/local/bin/
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools upx-ucl dos2unix jq curl tar xz-utils
+
+          cargo install cross --locked --version 0.2.5
+
+          NFPM_VER="2.43.1"
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VER}/nfpm_${NFPM_VER}_Linux_x86_64.tar.gz" \
+            | tar -xz
+          sudo install -m 0755 nfpm /usr/local/bin/nfpm
+
+      - name: Resolve Version Metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REF_RAW="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}"
+          VERSION="${REF_RAW#v}"
+
+          if [[ -z "${VERSION}" || "${VERSION}" == "master" || "${VERSION}" == "main" ]]; then
+            VERSION="0.0.0-dev.${GITHUB_RUN_NUMBER}"
+          fi
+
+          RELEASE_TAG="tun2proxy-${VERSION}-${GITHUB_RUN_NUMBER}"
+
+          {
+            echo "REF_RAW=${REF_RAW}"
+            echo "VERSION=${VERSION}"
+            echo "RELEASE_TAG=${RELEASE_TAG}"
+          } >> "$GITHUB_ENV"
 
       - name: Build Binary (Aggressive Optimization)
+        shell: bash
+        working-directory: src
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: z
+          CARGO_PROFILE_RELEASE_LTO: fat
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+          CARGO_PROFILE_RELEASE_PANIC: abort
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+          RUSTFLAGS: -C strip=symbols -C debuginfo=0
         run: |
-          cd src
-          # Флаги оптимизации уровня telemt-wrt
-          export CARGO_PROFILE_RELEASE_OPT_LEVEL="z"
-          export CARGO_PROFILE_RELEASE_LTO="fat"
-          export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-          export CARGO_PROFILE_RELEASE_PANIC="abort"
-          export CARGO_PROFILE_RELEASE_STRIP=true
-          
-          cross build --release --target aarch64-unknown-linux-musl
-          
-          # Финальное сжатие UPX
-          upx --ultra-brute --lzma target/aarch64-unknown-linux-musl/release/tun2proxy
-          mv target/aarch64-unknown-linux-musl/release/tun2proxy ../tun2proxy-bin
+          set -euxo pipefail
 
-      - name: Generate Scripts and Configuration
+          cross build --release --target "${TARGET}" --bin tun2proxy-bin
+
+          BIN="target/${TARGET}/release/tun2proxy-bin"
+          test -f "${BIN}"
+
+          # UPX compression is best-effort. Some builds may refuse packing.
+          upx --best --lzma "${BIN}" || true
+
+          install -m 0755 "${BIN}" "${GITHUB_WORKSPACE}/tun2proxy-bin"
+
+      - name: Generate Package Files
+        shell: bash
         run: |
-          mkdir -p pkg/etc/config pkg/etc/init.d pkg/usr/share/luci/menu.d pkg/www/luci-static/resources/view
+          set -euxo pipefail
 
-          # 1. UCI Config
-          cat << 'EOF' > pkg/etc/config/tun2proxy
+          PKGROOT="${GITHUB_WORKSPACE}/pkgroot"
+
+          mkdir -p \
+            "${PKGROOT}/etc/config" \
+            "${PKGROOT}/etc/init.d" \
+            "${PKGROOT}/usr/share/luci/menu.d" \
+            "${PKGROOT}/usr/share/rpcd/acl.d" \
+            "${PKGROOT}/www/luci-static/resources/view/tun2proxy"
+
+          cat > "${PKGROOT}/etc/config/tun2proxy" <<'EOF'
           config tun2proxy 'main'
               option enabled '0'
-              option proxy 'socks5://192.168.11.189:10808'
-              option interface 'tun0'
+              option proxy 'socks5://127.0.0.1:1080'
               option default_route '0'
           EOF
 
-          # 2. Init Script with Routing Anti-loop and Full Redirect logic
-          cat << 'EOF' > pkg/etc/init.d/tun2proxy
+          cat > "${PKGROOT}/etc/init.d/tun2proxy" <<'EOF'
           #!/bin/sh /etc/rc.common
 
           START=95
+          STOP=15
           USE_PROCD=1
 
-          start_service() {
-              config_load tun2proxy
-              config_get_bool enabled main enabled 0
-              [ "$enabled" -eq 0 ] && return
+          SERVICE_NAME="tun2proxy"
+          BIN_PATH="/usr/bin/tun2proxy"
+          TUN_IF="tun0"
+          PIDFILE="/var/run/tun2proxy.pid"
 
-              config_get proxy main proxy
-              config_get interface main interface "tun0"
+          EXTRA_COMMANDS="status"
+          EXTRA_HELP="    status   Show current service state"
 
-              procd_open_instance
-              procd_set_param command /usr/bin/tun2proxy --proxy "$proxy" --interface "$interface"
-              procd_set_param respawn
-              procd_set_param stdout 1
-              procd_set_param stderr 1
-              procd_close_instance
+          proxy_host() {
+              local proxy="$1"
+
+              proxy="${proxy#*://}"
+              proxy="${proxy#*@}"
+              proxy="${proxy%%/*}"
+
+              case "$proxy" in
+                  \[*\]:*)
+                      proxy="${proxy#\[}"
+                      proxy="${proxy%%\]*}"
+                  ;;
+                  \[*\])
+                      proxy="${proxy#\[}"
+                      proxy="${proxy%%\]*}"
+                  ;;
+                  *:*)
+                      proxy="${proxy%%:*}"
+                  ;;
+              esac
+
+              printf '%s\n' "$proxy"
           }
 
-          service_started() {
+          is_ipv4() {
+              echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          }
+
+          resolve_ipv4() {
+              local host="$1"
+              local ip=""
+
+              [ -n "$host" ] || return 1
+
+              if is_ipv4 "$host"; then
+                  printf '%s\n' "$host"
+                  return 0
+              fi
+
+              if command -v resolveip >/dev/null 2>&1; then
+                  ip="$(resolveip -4 "$host" 2>/dev/null | awk 'NR==1{print $1}')"
+                  [ -n "$ip" ] && {
+                      printf '%s\n' "$ip"
+                      return 0
+                  }
+              fi
+
+              if command -v getent >/dev/null 2>&1; then
+                  ip="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1{print $1}')"
+                  [ -n "$ip" ] && {
+                      printf '%s\n' "$ip"
+                      return 0
+                  }
+              fi
+
+              if command -v nslookup >/dev/null 2>&1; then
+                  ip="$(nslookup "$host" 2>/dev/null | awk '/^Address [0-9]+: /{print $3; exit} /^Address: /{print $2; exit}')"
+                  echo "$ip" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' && {
+                      printf '%s\n' "$ip"
+                      return 0
+                  }
+              fi
+
+              return 1
+          }
+
+          get_default_gw() {
+              ip route show default 2>/dev/null | awk '/default/ {print $3; exit}'
+          }
+
+          get_default_dev() {
+              ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'
+          }
+
+          add_bypass_route() {
+              local proxy host ip4 gw dev
+
               config_load tun2proxy
-              config_get interface main interface "tun0"
-              config_get_bool dr main default_route 0
               config_get proxy main proxy
 
-              # Wait for interface
-              local timeout=10
-              while [ ! -d "/sys/class/net/$interface" ] && [ $timeout -gt 0 ]; do
+              host="$(proxy_host "$proxy")"
+              gw="$(get_default_gw)"
+              dev="$(get_default_dev)"
+
+              [ -n "$host" ] || return 0
+              [ -n "$gw" ] || return 0
+              [ -n "$dev" ] || return 0
+
+              ip4="$(resolve_ipv4 "$host" 2>/dev/null || true)"
+              [ -n "$ip4" ] || {
+                  logger -t "$SERVICE_NAME" "Unable to resolve proxy host '$host' for bypass route"
+                  return 0
+              }
+
+              ip route replace "$ip4" via "$gw" dev "$dev" 2>/dev/null || true
+          }
+
+          del_bypass_route() {
+              local proxy host ip4
+
+              config_load tun2proxy
+              config_get proxy main proxy
+
+              host="$(proxy_host "$proxy")"
+              ip4="$(resolve_ipv4 "$host" 2>/dev/null || true)"
+
+              [ -n "$ip4" ] || return 0
+
+              ip route del "$ip4" 2>/dev/null || true
+          }
+
+          add_default_routes() {
+              ip route replace 0.0.0.0/1 dev "$TUN_IF" 2>/dev/null || true
+              ip route replace 128.0.0.0/1 dev "$TUN_IF" 2>/dev/null || true
+          }
+
+          del_default_routes() {
+              ip route del 0.0.0.0/1 dev "$TUN_IF" 2>/dev/null || true
+              ip route del 128.0.0.0/1 dev "$TUN_IF" 2>/dev/null || true
+          }
+
+          wait_for_tun() {
+              local timeout=12
+
+              while [ "$timeout" -gt 0 ]; do
+                  [ -d "/sys/class/net/$TUN_IF" ] && return 0
                   sleep 1
                   timeout=$((timeout - 1))
               done
 
-              [ ! -d "/sys/class/net/$interface" ] && return
-              ip link set dev "$interface" up
+              return 1
+          }
 
-              if [ "$dr" -eq 1 ]; then
-                  # Anti-loop protection: resolve proxy host and route via original gateway
-                  local phost=$(echo "$proxy" | sed -E 's/.*:\/\/([^:]+).*/\1/')
-                  local gw=$(ip route show default | awk '/default/ {print $3}')
-                  local dev=$(ip route show default | awk '/default/ {print $5}')
-                  
-                  if [ -n "$phost" ] && [ -n "$gw" ]; then
-                      ip route add "$phost" via "$gw" dev "$dev" 2>/dev/null
+          start_service() {
+              local enabled proxy default_route
+
+              config_load tun2proxy
+              config_get_bool enabled main enabled 0
+              config_get proxy main proxy
+              config_get_bool default_route main default_route 0
+
+              [ "$enabled" -eq 1 ] || return 0
+              [ -n "$proxy" ] || {
+                  logger -t "$SERVICE_NAME" "Proxy URL is empty"
+                  return 1
+              }
+
+              procd_open_instance
+              procd_set_param command "$BIN_PATH" --tun "$TUN_IF" --proxy "$proxy"
+              procd_set_param pidfile "$PIDFILE"
+              procd_set_param respawn 3600 5 5
+              procd_set_param stdout 1
+              procd_set_param stderr 1
+              procd_close_instance
+
+              if wait_for_tun; then
+                  ip link set dev "$TUN_IF" up 2>/dev/null || true
+
+                  if [ "$default_route" -eq 1 ]; then
+                      add_bypass_route
+                      add_default_routes
                   fi
-
-                  # Route all traffic through TUN (two halves method)
-                  ip route add 0.0.0.0/1 dev "$interface"
-                  ip route add 128.0.0.0/1 dev "$interface"
+              else
+                  logger -t "$SERVICE_NAME" "TUN device '$TUN_IF' was not created in time"
               fi
           }
 
           stop_service() {
-              config_load tun2proxy
-              config_get interface main interface "tun0"
-              ip route del 0.0.0.0/1 dev "$interface" 2>/dev/null
-              ip route del 128.0.0.0/1 dev "$interface" 2>/dev/null
+              del_default_routes
+              del_bypass_route
+          }
+
+          reload_service() {
+              stop
+              start
+          }
+
+          service_triggers() {
+              procd_add_reload_trigger tun2proxy
+          }
+
+          status() {
+              if procd_running "$SERVICE_NAME"; then
+                  local pid="-"
+                  [ -f "$PIDFILE" ] && pid="$(cat "$PIDFILE" 2>/dev/null || echo "-")"
+                  echo "running pid=${pid}"
+                  return 0
+              fi
+
+              echo "stopped"
+              return 1
           }
           EOF
 
-          # 3. LuCI Menu Definition
-          cat << 'EOF' > pkg/usr/share/luci/menu.d/luci-app-tun2proxy.json
+          cat > "${PKGROOT}/usr/share/luci/menu.d/luci-app-tun2proxy.json" <<'EOF'
           {
-              "admin/services/tun2proxy": {
-                  "title": "Tun2Proxy",
-                  "action": { "type": "view", "path": "tun2proxy/config" },
-                  "depends": { "acl": [ "luci-app-tun2proxy" ] }
+            "admin/services/tun2proxy": {
+              "title": "Tun2Proxy",
+              "order": 90,
+              "action": {
+                "type": "view",
+                "path": "tun2proxy/config"
+              },
+              "depends": {
+                "acl": [ "luci-app-tun2proxy" ]
               }
+            }
           }
           EOF
 
-          # 4. LuCI View (Javascript)
-          cat << 'EOF' > pkg/www/luci-static/resources/view/tun2proxy/config.js
+          cat > "${PKGROOT}/usr/share/rpcd/acl.d/luci-app-tun2proxy.json" <<'EOF'
+          {
+            "luci-app-tun2proxy": {
+              "description": "Grant access to Tun2Proxy configuration and service control",
+              "read": {
+                "uci": [ "tun2proxy" ],
+                "ubus": {
+                  "service": [ "list" ]
+                }
+              },
+              "write": {
+                "uci": [ "tun2proxy" ],
+                "ubus": {
+                  "luci": [ "setInitAction" ]
+                }
+              }
+            }
+          }
+          EOF
+
+          cat > "${PKGROOT}/www/luci-static/resources/view/tun2proxy/config.js" <<'EOF'
           'use strict';
-          'use ui';
+          'require view';
+          'require form';
+          'require rpc';
+          'require poll';
+          'require ui';
+          'require uci';
 
-          return L.view.extend({
-              render: function() {
-                  let m, s, o;
-                  m = new form.Map('tun2proxy', _('Tun2Proxy'), _('Transparent L3 Tunneling (Rust)'));
+          var callServiceList = rpc.declare({
+              object: 'service',
+              method: 'list',
+              params: [ 'name' ],
+              expect: { '': {} }
+          });
 
-                  s = m.section(form.TypedSection, 'main', _('Service Status'));
+          var callInitAction = rpc.declare({
+              object: 'luci',
+              method: 'setInitAction',
+              params: [ 'name', 'action' ],
+              expect: { result: false }
+          });
+
+          function serviceStateFromReply(reply) {
+              var data = reply || {};
+              var svc = data.tun2proxy || data['tun2proxy'] || {};
+              var instances = svc.instances || {};
+              var keys = Object.keys(instances);
+              var pid = null;
+              var running = false;
+
+              keys.forEach(function(k) {
+                  var inst = instances[k] || {};
+                  if (inst.running === true || inst.pid || inst.command) {
+                      running = true;
+                  }
+                  if (!pid && inst.pid)
+                      pid = inst.pid;
+              });
+
+              return {
+                  running: running,
+                  pid: pid
+              };
+          }
+
+          return view.extend({
+              load: function() {
+                  return Promise.all([
+                      uci.load('tun2proxy'),
+                      callServiceList('tun2proxy')
+                  ]);
+              },
+
+              handleServiceAction: function(action, ev) {
+                  return ui.createHandlerFn(this, function() {
+                      return callInitAction('tun2proxy', action)
+                          .then(function() {
+                              return uci.load('tun2proxy');
+                          })
+                          .then(L.bind(this.render, this))
+                          .catch(function(err) {
+                              ui.addNotification(null, E('p', {}, err.message || _('Operation failed')));
+                          });
+                  })(ev);
+              },
+
+              render: function(data) {
+                  var svc = serviceStateFromReply(data[1]);
+                  var tunPresent = !!document.querySelector ? null : null;
+                  var m, s, o;
+
+                  m = new form.Map('tun2proxy', _('Tun2Proxy'),
+                      _('Lightweight web UI for starting, stopping and configuring tun2proxy on OpenWrt.'));
+
+                  s = m.section(form.TypedSection, 'tun2proxy', _('Live Status'));
                   s.anonymous = true;
-                  s.render = function() {
-                      return L.resolveDefault(L.getProcessList('tun2proxy'), []).then(L.bind(function(res) {
-                          let running = res.length > 0;
-                          return E('div', { 'class': 'cbi-section' }, [
-                              E('p', {}, [
-                                  running ? E('span', { 'style': 'color:green;font-weight:bold' }, _('RUNNING')) :
-                                            E('span', { 'style': 'color:red;font-weight:bold' }, _('NOT RUNNING'))
-                              ])
-                          ]);
-                      }, this));
+
+                  o = s.option(form.DummyValue, '_status', _('Service state'),
+                      _('This field is refreshed automatically and shows whether the daemon is currently active.'));
+                  o.rawhtml = true;
+                  o.cfgvalue = function() {
+                      var label = svc.running ? _('Running') : _('Stopped');
+                      var color = svc.running ? '#16a34a' : '#dc2626';
+                      var pid = svc.pid ? String(svc.pid) : '-';
+                      var tunExists = document.querySelector && document.querySelector('[data-tun2proxy-tun]') ?
+                          document.querySelector('[data-tun2proxy-tun]').getAttribute('data-tun2proxy-tun') : null;
+
+                      if (!tunExists && typeof window !== 'undefined')
+                          tunExists = null;
+
+                      return '<span style="color:' + color + ';font-weight:600">' + label + '</span>' +
+                          ' &nbsp; | &nbsp; PID: <strong>' + pid + '</strong>' +
+                          ' &nbsp; | &nbsp; tun0: <strong><span data-tun2proxy-tun-pending="1">checking...</span></strong>';
                   };
 
-                  s = m.section(form.TypedSection, 'main', _('Settings'));
-                  s.anonymous = true;
-                  s.option(form.Flag, 'enabled', _('Enable Service'));
-                  o = s.option(form.Value, 'proxy', _('Proxy URL'));
-                  o.placeholder = 'socks5://192.168.11.189:10808';
-                  s.option(form.Value, 'interface', _('TUN Interface')).placeholder = 'tun0';
-                  s.option(form.Flag, 'default_route', _('Default Route'), _('Redirect all traffic through TUN'));
+                  o = s.option(form.Button, '_start');
+                  o.title = _('Start service');
+                  o.description = _('Start tun2proxy immediately without waiting for a reboot or config re-apply.');
+                  o.inputtitle = _('Start');
+                  o.inputstyle = 'apply';
+                  o.onclick = L.bind(this.handleServiceAction, this, 'start');
 
-                  return m.render();
+                  o = s.option(form.Button, '_stop');
+                  o.title = _('Stop service');
+                  o.description = _('Stop tun2proxy immediately and remove temporary tun0 default-route redirects.');
+                  o.inputtitle = _('Stop');
+                  o.inputstyle = 'remove';
+                  o.onclick = L.bind(this.handleServiceAction, this, 'stop');
+
+                  o = s.option(form.Button, '_restart');
+                  o.title = _('Restart service');
+                  o.description = _('Restart tun2proxy and refresh its process identifier. Useful to confirm a real restart.');
+                  o.inputtitle = _('Restart');
+                  o.inputstyle = 'apply';
+                  o.onclick = L.bind(this.handleServiceAction, this, 'restart');
+
+                  s = m.section(form.TypedSection, 'tun2proxy', _('Configuration'));
+                  s.anonymous = true;
+
+                  o = s.option(form.Flag, 'enabled', _('Enable service'),
+                      _('Enable automatic start on boot. When unchecked, manual Start from this page still works until the next reboot.'));
+                  o.rmempty = false;
+
+                  o = s.option(form.Value, 'proxy', _('Proxy URL'),
+                      _('Enter a full proxy URL such as socks5://127.0.0.1:1080, socks5://192.168.1.10:1080 or a hostname like socks5://my-exit-node.tailnet:1080.'));
+                  o.rmempty = false;
+                  o.datatype = 'string';
+                  o.placeholder = 'socks5://127.0.0.1:1080';
+
+                  o = s.option(form.Flag, 'default_route', _('Default route to tun0'),
+                      _('When enabled, all IPv4 traffic is redirected through tun0, while the proxy endpoint itself is kept reachable through the original WAN route.'));
+                  o.rmempty = false;
+
+                  return m.render().then(function(nodes) {
+                      var updateTunIndicator = function() {
+                          return L.resolveDefault(callServiceList('tun2proxy'), {}).then(function(reply) {
+                              var st = serviceStateFromReply(reply);
+                              var pidNode = nodes.querySelector('[data-name="_status"] .cbi-value-field');
+                              var tunNode = nodes.querySelector('[data-tun2proxy-tun-pending="1"]');
+
+                              if (pidNode) {
+                                  var label = st.running ? _('Running') : _('Stopped');
+                                  var color = st.running ? '#16a34a' : '#dc2626';
+                                  var pid = st.pid ? String(st.pid) : '-';
+                                  pidNode.innerHTML =
+                                      '<span style="color:' + color + ';font-weight:600">' + label + '</span>' +
+                                      ' &nbsp; | &nbsp; PID: <strong>' + pid + '</strong>' +
+                                      ' &nbsp; | &nbsp; tun0: <strong>' +
+                                      (document.querySelector('body') ? '<span data-tun2proxy-tun-runtime="1">checking...</span>' : '-') +
+                                      '</strong>';
+                              }
+
+                              return L.resolveDefault(fetch('/cgi-bin/luci/admin/services/tun2proxy', {
+                                  method: 'HEAD',
+                                  credentials: 'same-origin'
+                              }), null).then(function() {
+                                  var runtimeTun = nodes.querySelector('[data-tun2proxy-tun-runtime="1"]');
+                                  if (runtimeTun) {
+                                      runtimeTun.textContent = '-';
+                                  }
+                              });
+                          }).catch(function() {});
+                      };
+
+                      poll.add(function() {
+                          return callServiceList('tun2proxy').then(function(reply) {
+                              var st = serviceStateFromReply(reply);
+                              var field = nodes.querySelector('[data-name="_status"] .cbi-value-field');
+                              var tunExists = !!document.querySelector('body');
+
+                              if (field) {
+                                  var label = st.running ? _('Running') : _('Stopped');
+                                  var color = st.running ? '#16a34a' : '#dc2626';
+                                  var pid = st.pid ? String(st.pid) : '-';
+
+                                  field.innerHTML =
+                                      '<span style="color:' + color + ';font-weight:600">' + label + '</span>' +
+                                      ' &nbsp; | &nbsp; PID: <strong>' + pid + '</strong>' +
+                                      ' &nbsp; | &nbsp; tun0: <strong>' + (tunExists ? _('Unknown from browser') : _('Unknown')) + '</strong>';
+                              }
+                          });
+                      }, 3);
+
+                      return nodes;
+                  });
               }
           });
           EOF
 
-          # Final fixes
-          chmod 755 pkg/etc/init.d/tun2proxy
-          dos2unix pkg/etc/init.d/tun2proxy pkg/etc/config/tun2proxy
+          chmod 0755 "${PKGROOT}/etc/init.d/tun2proxy"
+          dos2unix \
+            "${PKGROOT}/etc/config/tun2proxy" \
+            "${PKGROOT}/etc/init.d/tun2proxy" \
+            "${PKGROOT}/usr/share/luci/menu.d/luci-app-tun2proxy.json" \
+            "${PKGROOT}/usr/share/rpcd/acl.d/luci-app-tun2proxy.json" \
+            "${PKGROOT}/www/luci-static/resources/view/tun2proxy/config.js"
 
-      - name: Build Packages (nFPM)
+      - name: Patch LuCI view with direct tun0 presence check
+        shell: bash
         run: |
-          VER_RAW=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
-          VERSION=$(echo $VER_RAW | sed 's/^v//; s/main/1.0.0/')
-          
-          export PKG_DESC="Highly optimized Rust TUN-to-SOCKS/HTTP proxy for OpenWrt. Includes LuCI interface."
+          set -euxo pipefail
 
-          # nFPM Config
-          cat << EOF > nfpm.yaml
-          name: luci-app-tun2proxy
-          arch: aarch64_generic
+          cat > "${GITHUB_WORKSPACE}/pkgroot/www/luci-static/resources/view/tun2proxy/config.js" <<'EOF'
+          'use strict';
+          'require view';
+          'require form';
+          'require rpc';
+          'require poll';
+          'require ui';
+          'require uci';
+          'require fs';
+
+          var callServiceList = rpc.declare({
+              object: 'service',
+              method: 'list',
+              params: [ 'name' ],
+              expect: { '': {} }
+          });
+
+          var callInitAction = rpc.declare({
+              object: 'luci',
+              method: 'setInitAction',
+              params: [ 'name', 'action' ],
+              expect: { result: false }
+          });
+
+          function serviceStateFromReply(reply) {
+              var data = reply || {};
+              var svc = data.tun2proxy || {};
+              var instances = svc.instances || {};
+              var keys = Object.keys(instances);
+              var pid = null;
+              var running = false;
+
+              keys.forEach(function(k) {
+                  var inst = instances[k] || {};
+                  if (inst.running === true || !!inst.pid)
+                      running = true;
+                  if (!pid && inst.pid)
+                      pid = inst.pid;
+              });
+
+              return {
+                  running: running,
+                  pid: pid
+              };
+          }
+
+          return view.extend({
+              load: function() {
+                  return Promise.all([
+                      uci.load('tun2proxy'),
+                      callServiceList('tun2proxy'),
+                      L.resolveDefault(fs.stat('/sys/class/net/tun0'), null)
+                  ]);
+              },
+
+              handleServiceAction: function(action, ev) {
+                  return ui.createHandlerFn(this, function() {
+                      return callInitAction('tun2proxy', action)
+                          .then(function() {
+                              return Promise.all([
+                                  uci.load('tun2proxy'),
+                                  callServiceList('tun2proxy'),
+                                  L.resolveDefault(fs.stat('/sys/class/net/tun0'), null)
+                              ]);
+                          })
+                          .then(L.bind(this.render, this))
+                          .catch(function(err) {
+                              ui.addNotification(null, E('p', {}, err.message || _('Operation failed')));
+                          });
+                  })(ev);
+              },
+
+              render: function(data) {
+                  var svc = serviceStateFromReply(data[1]);
+                  var tunStat = data[2];
+                  var m, s, o;
+
+                  function statusHtml(state, tunObj) {
+                      var label = state.running ? _('Running') : _('Stopped');
+                      var color = state.running ? '#16a34a' : '#dc2626';
+                      var pid = state.pid ? String(state.pid) : '-';
+                      var tun = tunObj ? _('Present') : _('Missing');
+
+                      return '<span style="color:' + color + '; font-weight:600">' + label + '</span>' +
+                          ' &nbsp; | &nbsp; PID: <strong>' + pid + '</strong>' +
+                          ' &nbsp; | &nbsp; tun0: <strong>' + tun + '</strong>';
+                  }
+
+                  m = new form.Map('tun2proxy', _('Tun2Proxy'),
+                      _('Lightweight control page for tun2proxy with live state, process ID and fast service actions.'));
+
+                  s = m.section(form.TypedSection, 'tun2proxy', _('Live Status'));
+                  s.anonymous = true;
+
+                  o = s.option(form.DummyValue, '_status', _('Runtime state'),
+                      _('Shows whether the service is running, its current PID when available, and whether tun0 exists in the system.'));
+                  o.rawhtml = true;
+                  o.cfgvalue = function() {
+                      return statusHtml(svc, tunStat);
+                  };
+
+                  o = s.option(form.Button, '_start');
+                  o.title = _('Start service');
+                  o.description = _('Start tun2proxy immediately.');
+                  o.inputtitle = _('Start');
+                  o.inputstyle = 'apply';
+                  o.onclick = L.bind(this.handleServiceAction, this, 'start');
+
+                  o = s.option(form.Button, '_stop');
+                  o.title = _('Stop service');
+                  o.description = _('Stop tun2proxy immediately and remove temporary tun0 route overrides.');
+                  o.inputtitle = _('Stop');
+                  o.inputstyle = 'remove';
+                  o.onclick = L.bind(this.handleServiceAction, this, 'stop');
+
+                  o = s.option(form.Button, '_restart');
+                  o.title = _('Restart service');
+                  o.description = _('Restart tun2proxy and refresh the PID so you can verify that a real restart happened.');
+                  o.inputtitle = _('Restart');
+                  o.inputstyle = 'apply';
+                  o.onclick = L.bind(this.handleServiceAction, this, 'restart');
+
+                  s = m.section(form.TypedSection, 'tun2proxy', _('Configuration'));
+                  s.anonymous = true;
+
+                  o = s.option(form.Flag, 'enabled', _('Enable service'),
+                      _('Enable automatic start during boot. This does not prevent you from using the Start button for temporary manual runs.'));
+                  o.rmempty = false;
+
+                  o = s.option(form.Value, 'proxy', _('Proxy URL'),
+                      _('Accepts localhost, LAN addresses and resolvable hostnames. Examples: socks5://127.0.0.1:1080, socks5://192.168.1.20:1080, socks5://ts-exit.tailnet:1080.'));
+                  o.datatype = 'string';
+                  o.rmempty = false;
+                  o.placeholder = 'socks5://127.0.0.1:1080';
+
+                  o = s.option(form.Flag, 'default_route', _('Default route to tun0'),
+                      _('Redirect all IPv4 traffic through tun0 while keeping the configured proxy endpoint reachable through the original WAN path.'));
+                  o.rmempty = false;
+
+                  return m.render().then(function(nodes) {
+                      poll.add(function() {
+                          return Promise.all([
+                              callServiceList('tun2proxy'),
+                              L.resolveDefault(fs.stat('/sys/class/net/tun0'), null)
+                          ]).then(function(res) {
+                              var state = serviceStateFromReply(res[0]);
+                              var tun = res[1];
+                              var field = nodes.querySelector('[data-name="_status"] .cbi-value-field');
+
+                              if (field)
+                                  field.innerHTML = statusHtml(state, tun);
+                          });
+                      }, 3);
+
+                      return nodes;
+                  });
+              }
+          });
+          EOF
+
+      - name: Create nFPM config and package
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p packaging
+
+          cat > packaging/postinstall.sh <<'EOF'
+          #!/bin/sh
+          set -e
+
+          [ -n "${IPKG_INSTROOT}" ] && exit 0
+
+          /etc/init.d/tun2proxy enable >/dev/null 2>&1 || true
+          /etc/init.d/rpcd reload >/dev/null 2>&1 || true
+          rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+          exit 0
+          EOF
+
+          cat > packaging/preremove.sh <<'EOF'
+          #!/bin/sh
+          set -e
+
+          [ -n "${IPKG_INSTROOT}" ] && exit 0
+
+          /etc/init.d/tun2proxy stop >/dev/null 2>&1 || true
+          /etc/init.d/tun2proxy disable >/dev/null 2>&1 || true
+          rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+          exit 0
+          EOF
+
+          chmod 0755 packaging/postinstall.sh packaging/preremove.sh
+
+          cat > nfpm.yaml <<EOF
+          name: ${PKG_NAME}
+          arch: aarch64
           platform: linux
           version: ${VERSION}
-          description: "${PKG_DESC}"
-          maintainer: "Arikusey"
+          section: net
+          priority: optional
+          maintainer: Arikusey
+          description: |
+            Highly optimized Rust tun2proxy package for OpenWrt with a lightweight LuCI interface.
+          homepage: https://github.com/tun2proxy/tun2proxy
+          license: MIT
+
           depends:
             - kmod-tun
             - ip-full
-            - ca-bundle
+            - procd
+            - uci
+            - luci-base
+
           contents:
             - src: ./tun2proxy-bin
               dst: /usr/bin/tun2proxy
-              file_info: { mode: 0755 }
-            - src: ./pkg
+              file_info:
+                mode: 0755
+
+            - src: ./pkgroot/
               dst: /
+              type: tree
+
+            - src: ./pkgroot/etc/config/tun2proxy
+              dst: /etc/config/tun2proxy
+              type: config|noreplace
+
           scripts:
-            postinstall: |
-              #!/bin/sh
-              [ -n "\${IPKG_INSTROOT}" ] || {
-                  /etc/init.d/tun2proxy enable
-                  rm -f /tmp/luci-indexcache /tmp/luci-modulecache
-                  exit 0
-              }
+            postinstall: ./packaging/postinstall.sh
+            preremove: ./packaging/preremove.sh
+
+          apk:
+            arch: aarch64
+
+          ipk:
+            arch: aarch64_generic
           EOF
 
-          nfpm pkg --config nfpm.yaml --packager ipk --target "luci-app-tun2proxy_${VERSION}_aarch64.ipk"
-          nfpm pkg --config nfpm.yaml --packager apk --target "luci-app-tun2proxy_${VERSION}_aarch64.apk"
+          nfpm package --config nfpm.yaml --packager ipk --target "${PKG_NAME}_${VERSION}_aarch64_generic.ipk"
+          nfpm package --config nfpm.yaml --packager apk --target "${PKG_NAME}_${VERSION}_aarch64.apk"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tun2proxy-packages-${{ env.VERSION }}
+          path: |
+            *.ipk
+            *.apk
+            tun2proxy-bin
 
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Tun2Proxy ${{ env.VERSION }}
           files: |
             *.ipk
             *.apk
-          tag_name: ${{ env.VERSION }}-${{ github.run_number }}
-          name: Release ${{ env.VERSION }}
+            tun2proxy-bin
           draft: false
           prerelease: false

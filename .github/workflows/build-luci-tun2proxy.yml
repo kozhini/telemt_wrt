@@ -1,4 +1,4 @@
-name: Build and Release Tun2Proxy (AIO)
+name: Build and Release Tun2Proxy (AIO) v2
 
 on:
   push:

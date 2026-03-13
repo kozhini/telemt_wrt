@@ -84,9 +84,11 @@ run_save_stats() {
 generate_toml() {
     local target_file="$1"
 
-    # Force pure state by clearing all possible old config locations
+    # Ensure directories exist. Do NOT pre-delete /tmp/etc/telemt.toml here:
+    # if mktemp or generation fails, the live config would be gone and the binary
+    # would lose hot-reload source → crash loop. We only nuke the /var/etc alias.
     mkdir -p /tmp/etc /var/etc
-    rm -f /var/etc/telemt.toml /tmp/etc/telemt.toml
+    rm -f /var/etc/telemt.toml
 
     local TMP_LINKS=$(mktemp /tmp/telemt_links.XXXXXX)
     local TMP_USERS=$(mktemp /tmp/telemt_users.XXXXXX)
@@ -325,9 +327,12 @@ TOML
 enabled = $api_str
 listen = "0.0.0.0:${api_port}"
 whitelist = [$wl_toml]
+# extended_runtime_enabled: exposes /v1/stats/minimal/all (ME pool, DCs, writers).
+# Must be true for LuCI dashboard health grid, ME status and degradation badges.
+extended_runtime_enabled = $api_str
 minimal_runtime_enabled = $minimal_rt_str
 minimal_runtime_cache_ttl_ms = 1000
-# PATCH 3.3.16: explicit contract — bot and UI must be able to mutate users via API
+# explicit contract: LuCI and API clients must be able to mutate users
 read_only = false
 TOML
 

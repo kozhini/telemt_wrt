@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # ==============================================================================
 # Telemt init.d / procd service script
-# Version: 3.3.16-2 — Refactored (phantom ME params removed, public_port added)
+# Version: 3.3.16-3 — Refactored (phantom ME params removed, public_port added)
 # ==============================================================================
 START=99
 STOP=10
@@ -582,7 +582,7 @@ reload_service() {
         mv "$NEW_CONF" "$CONF"
         logger -t telemt "WebUI: Users/Upstreams updated. Executed Hot-Reload (no connections dropped)."
     else
-        mv "$NEW_CONF" "$CONF"
+        rm -f "$NEW_CONF"
         logger -t telemt "WebUI: Core settings changed. Performing hard restart of telemt."
         restart
     fi

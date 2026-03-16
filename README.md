@@ -1,7 +1,7 @@
 <h1 align="center">🚀 Headless Telemt for OpenWrt</h1>
 
 <p align="center">
-  Lightweight <b>telemt</b> binary packages for OpenWrt<br/>
+  Lightweight but sophisticated <b>Telegram MTProxy</b> binary packages for OpenWrt 21-25<br/>
   <i>Built from the official <code>telemt/telemt</code> repository and adapted for real OpenWrt deployment</i>
 </p>
 

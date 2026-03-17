@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # ==============================================================================
 # Telemt init.d / procd service script
-# Version: 3.3.16-5 — Refactored (phantom ME params removed, public_port added)
+# Version: 3.3.16-10 — bot-safe kill (cmdline check), no killall
 # ==============================================================================
 START=99
 STOP=10
@@ -484,11 +484,18 @@ TOML
 
 # ------------------------------------------------------------------------------
 get_telemt_pids() {
-    local p comm out=""
+    # Returns PIDs of the telemt PROXY process only (not telemt-bot or other sidecars).
+    # Checks: comm == "telemt" AND cmdline contains the TOML config path.
+    local p comm cmdline out=""
     for p in $(pidof telemt 2>/dev/null); do
         comm=$(cat "/proc/$p/comm" 2>/dev/null)
         [ "$comm" = "telemt" ] || continue
-        out="$out $p"
+        cmdline=$(cat "/proc/$p/cmdline" 2>/dev/null | tr '\0' ' ')
+        # The proxy is launched as: /usr/bin/telemt /tmp/etc/telemt.toml
+        # The bot would be: telemt-bot ... or telemt --bot-mode ...
+        case "$cmdline" in
+            *telemt.toml*|*"$PROG"*) out="$out $p" ;;
+        esac
     done
     echo "$out" | sed 's/^ *//'
 }
@@ -526,7 +533,10 @@ start_service() {
 
     local enabled
     config_get_bool enabled general enabled 0
-    if [ "$enabled" -ne 1 ]; then return 0; fi
+    if [ "$enabled" -ne 1 ]; then
+        logger -t telemt "Init: Service is disabled in config (Enable checkbox). Refusing start."
+        return 0
+    fi
 
     if [ ! -x "$PROG" ]; then
         logger -t telemt "Init: CRITICAL ERROR! Binary not found or not executable at $PROG"
@@ -597,6 +607,12 @@ start_service() {
 
 # ------------------------------------------------------------------------------
 reload_service() {
+    # If manual stop flag is set, don't reload — user explicitly stopped the service.
+    if [ -f "$MANUAL_STOP" ]; then
+        logger -t telemt "Init: reload_service() skipped — manual stop flag is set."
+        return 0
+    fi
+
     umask 077
     config_load telemt
 
@@ -615,19 +631,15 @@ reload_service() {
     fi
     chmod 600 "$NEW_CONF"
 
-    # Hot-reload diff: compare static (core) sections only.
-    # Dynamic section (users/upstreams) starts at "# --- DYNAMIC CONFIG ---".
-    # If core is unchanged → swap file and signal daemon (no connection drops).
-    # If core changed     → full restart.
     sed -n '1,/^# --- DYNAMIC CONFIG ---/p' "$CONF" 2>/dev/null > /tmp/etc/telemt_core.old
     sed -n '1,/^# --- DYNAMIC CONFIG ---/p' "$NEW_CONF"          > /tmp/etc/telemt_core.new
 
     if cmp -s /tmp/etc/telemt_core.old /tmp/etc/telemt_core.new; then
         mv "$NEW_CONF" "$CONF"
-        logger -t telemt "WebUI: Users/Upstreams updated. Executed Hot-Reload (no connections dropped)."
+        logger -t telemt "Init: Hot-reload (users/upstreams only, no restart)."
     else
         rm -f "$NEW_CONF"
-        logger -t telemt "WebUI: Core settings changed. Performing hard restart of telemt."
+        logger -t telemt "Init: Core settings changed. Hard restart."
         restart
     fi
 
@@ -635,43 +647,55 @@ reload_service() {
 }
 
 # ------------------------------------------------------------------------------
+# stop_service() — procd callback. Called by rc_procd stop_service AFTER procd_kill
+# deregisters the service. procd already sent SIGTERM. We save stats and guarantee
+# the process is dead.
 stop_service() {
-    [ "$TELEMT_NO_SAVE" != "1" ] && run_save_stats
-    : > "$MANUAL_STOP"
-
-    # Graceful daemon shutdown: SIGTERM first, then wait, then SIGKILL if needed.
-    local p
-    for p in $(get_telemt_pids); do
-        kill -TERM "$p" 2>/dev/null
-    done
-
-    if ! wait_telemt_pids_gone 3; then
+    run_save_stats
+    # procd already sent SIGTERM; wait, then force-kill if needed.
+    if ! wait_telemt_pids_gone 4; then
+        logger -t telemt "Init: stop_service() — survived SIGTERM, sending SIGKILL"
         force_kill_telemt
-        wait_telemt_pids_gone 2
+        sleep 1
     fi
+    logger -t telemt "Init: stop_service() done."
 }
 
 # ------------------------------------------------------------------------------
+# Explicit stop from CLI/LuCI.
+stop() {
+    : > "$MANUAL_STOP"
+    logger -t telemt "Init: stop() — flag set, stopping via procd."
+    rc_procd stop_service "$@"
+    # Belt-and-suspenders: if proxy process still alive
+    if [ -n "$(get_telemt_pids)" ]; then
+        logger -t telemt "Init: stop() — survivors, force killing."
+        force_kill_telemt
+        sleep 1
+    fi
+    logger -t telemt "Init: stop() complete."
+}
+
+# ------------------------------------------------------------------------------
+# Explicit start from CLI/LuCI.
 start() {
     rm -f "$MANUAL_STOP"
+    logger -t telemt "Init: start() called."
     rc_procd start_service "$@"
 }
 
 # ------------------------------------------------------------------------------
-stop() {
-    rc_procd stop_service "$@"
-}
-
-# ------------------------------------------------------------------------------
+# Explicit restart from CLI/LuCI.
 restart() {
     rm -f "$MANUAL_STOP"
-
-    stop_service
-    if ! wait_telemt_pids_gone 1; then
+    logger -t telemt "Init: restart() — stopping old."
+    run_save_stats
+    rc_procd stop_service "$@"
+    if ! wait_telemt_pids_gone 3; then
         force_kill_telemt
-        wait_telemt_pids_gone 2
+        sleep 1
     fi
-
+    logger -t telemt "Init: restart() — starting fresh."
     rc_procd start_service "$@"
 }
 

@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # ==============================================================================
 # Telemt init.d / procd service script
-# Version: 3.3.22 — bot-safe kill (cmdline check), no killall
+# Version: 3.3.22 — added data_path (version-gated >= 3.3.19), based on 3.3.16-10
 # ==============================================================================
 START=99
 STOP=10
@@ -280,10 +280,25 @@ log_level = "$log_level"
 TOML
 
     # PATCH 3.3.22: data_path — runtime data directory
-    [ -n "$data_path" ] && {
-        mkdir -p "$data_path" 2>/dev/null
-        printf 'data_path = "%s"\n' "$data_path" >> "$TMP_CONF"
-    }
+    # Only for binary >= 3.3.19 (PR#433 added data_path support)
+    if [ -n "$data_path" ]; then
+        local _cur_ver=$(cat "$VER_FILE" 2>/dev/null)
+        local _dp_ok=0
+        if [ -n "$_cur_ver" ]; then
+            local _ma=${_cur_ver%%.*} _rest=${_cur_ver#*.}
+            local _mi=${_rest%%.*} _pa=${_rest#*.}
+            # 3.3.19+ → major>3 OR (major==3 AND minor>3) OR (major==3 AND minor==3 AND patch>=19)
+            [ "${_ma:-0}" -gt 3 ] 2>/dev/null && _dp_ok=1
+            [ "${_ma:-0}" -eq 3 ] && [ "${_mi:-0}" -gt 3 ] 2>/dev/null && _dp_ok=1
+            [ "${_ma:-0}" -eq 3 ] && [ "${_mi:-0}" -eq 3 ] && [ "${_pa:-0}" -ge 19 ] 2>/dev/null && _dp_ok=1
+        fi
+        if [ "$_dp_ok" = "1" ]; then
+            mkdir -p "$data_path" 2>/dev/null
+            printf 'data_path = "%s"\n' "$data_path" >> "$TMP_CONF"
+        else
+            logger -t telemt "Init: data_path ignored (binary ${_cur_ver:-unknown} < 3.3.19)"
+        fi
+    fi
 
     # --- ME block (only when enabled) ---
     if [ "$use_mp" -eq 1 ]; then

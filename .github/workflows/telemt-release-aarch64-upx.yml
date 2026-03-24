@@ -24,12 +24,13 @@ jobs:
       - name: Extract version
         id: vars
         run: |
+          set -euxo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "VERSION=${{ github.event.inputs.build_target }}" >> $GITHUB_ENV
+            echo "VERSION=${{ github.event.inputs.build_target }}" >> "$GITHUB_ENV"
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
           else
-            echo "VERSION=nightly" >> $GITHUB_ENV
+            echo "VERSION=nightly" >> "$GITHUB_ENV"
           fi
 
       - name: Checkout local repository
@@ -38,9 +39,9 @@ jobs:
       - name: Checkout upstream repository (Telemt source)
         uses: actions/checkout@v4
         with:
-          repository: 'telemt/telemt'
+          repository: telemt/telemt
           ref: ${{ env.VERSION }}
-          path: 'upstream_src'
+          path: upstream_src
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -58,7 +59,7 @@ jobs:
           NFPM_TAG=$(curl -sL https://api.github.com/repos/goreleaser/nfpm/releases/latest | jq -r .tag_name)
           NFPM_VER=${NFPM_TAG#v}
           curl -sSfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_TAG}/nfpm_${NFPM_VER}_Linux_x86_64.tar.gz" | tar -xz
-          sudo mv nfpm /usr/local/bin/nfpm
+          sudo mv nfpm /usr/local/bin/
 
       - name: Build binary with cross
         run: |
@@ -141,7 +142,7 @@ jobs:
 
           export SOURCE_DATE_EPOCH=1704067200
           for ARCH in "${ARCHS[@]}"; do
-            export PKG_ARCH=$ARCH
+            export PKG_ARCH="$ARCH"
             cat > nfpm_ipk.yaml <<EOF
           name: telemt
           arch: ${PKG_ARCH}
@@ -176,7 +177,7 @@ jobs:
 
           unset SOURCE_DATE_EPOCH
           for ARCH in "${ARCHS[@]}"; do
-            export PKG_ARCH=$ARCH
+            export PKG_ARCH="$ARCH"
             cat > nfpm_apk.yaml <<EOF
           name: telemt
           arch: ${PKG_ARCH}
@@ -206,7 +207,25 @@ jobs:
             nfpm pkg --config nfpm_apk.yaml --packager apk --target "telemt_${PKG_VER}_${PKG_ARCH}.apk"
           done
 
-      - name: Create or update GitHub Release
+      - name: Fetch upstream release notes
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+
+          TAG="${{ env.VERSION }}"
+          mkdir -p .release
+
+          if gh release view "$TAG" -R telemt/telemt --json body,name >/tmp/upstream_release.json 2>/dev/null; then
+            jq -r '.body // ""' /tmp/upstream_release.json > .release/body.txt
+            jq -r '.name // ""' /tmp/upstream_release.json > .release/upstream_name.txt
+          else
+            printf '' > .release/body.txt
+            printf '' > .release/upstream_name.txt
+          fi
+
+      - name: Create or update GitHub Release from upstream notes
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -216,19 +235,21 @@ jobs:
           TAG="${{ env.VERSION }}"
           TITLE="Release ${TAG}"
 
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            echo "Release exists, updating assets only"
-            gh release upload "${TAG}" \
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "$TITLE" \
+              --notes-file .release/body.txt
+
+            gh release upload "$TAG" \
               telemt-aarch64-musl \
               *.ipk \
               *.apk \
               --clobber
           else
-            echo "Release does not exist, creating with empty body"
-            gh release create "${TAG}" \
+            gh release create "$TAG" \
               telemt-aarch64-musl \
               *.ipk \
               *.apk \
-              --title "${TITLE}" \
-              --notes ""
+              --title "$TITLE" \
+              --notes-file .release/body.txt
           fi

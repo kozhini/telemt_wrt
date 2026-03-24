@@ -213,5 +213,7 @@ jobs:
             *.apk
           name: Release ${{ env.VERSION }}
           tag_name: ${{ env.VERSION }}
+          body: ""
+          generate_release_notes: false
           prerelease: false
           draft: false

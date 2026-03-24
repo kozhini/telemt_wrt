@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 # ==============================================================================
 # Telemt init.d / procd service script
-# Version: 3.3.22 — added data_path (version-gated >= 3.3.19), based on 3.3.16-10
+# Version: 3.3.30 — mask_port/mask_host from UCI, shadowsocks upstream, based on 3.3.22
 # ==============================================================================
 START=99
 STOP=10
@@ -117,7 +117,7 @@ generate_toml() {
     #   me_shadow_writers, me_outage_mode, me_outage_no_quarantine, me_shadow_rotate
     # These were silent-ignored by the Rust TOML parser — the binary self-adapts.
     local me_pool_size me_warm_standby me_update_every hardswap me_drain_ttl auto_deg deg_min_dc
-    local desync_all mask_proxy_protocol
+    local desync_all mask_proxy_protocol mask_port mask_host
 
     config_get mode general mode "tls"
     config_get port general port "8443"
@@ -157,6 +157,16 @@ generate_toml() {
 
     config_get mask_proxy_protocol general mask_proxy_protocol "0"
     case "$mask_proxy_protocol" in 1|2) ;; *) mask_proxy_protocol="0" ;; esac
+
+    # PATCH 3.3.30: mask_port — upstream mask port for TLS fronting (Self-Stealth)
+    # Allows redirecting DPI scanners to a local web server (e.g. uhttpd on 127.0.0.1:4433)
+    config_get mask_port general mask_port "443"
+    is_uint "$mask_port" || mask_port="443"
+
+    # PATCH 3.3.30: mask_host — upstream mask host for TLS fronting relay
+    # When set, scanners are relayed to this host instead of the real tls_domain
+    config_get mask_host general mask_host ""
+    mask_host=$(echo "$mask_host" | tr -cd 'A-Za-z0-9.:-')
 
     config_get prefer_ip general prefer_ip "4"
     if [ "$prefer_ip" != "4" ] && [ "$prefer_ip" != "6" ]; then prefer_ip="4"; fi
@@ -383,8 +393,14 @@ client_ack = $tm_ack
 [censorship]
 tls_domain = "$domain"
 mask = true
-mask_port = 443
+mask_port = $mask_port
 mask_proxy_protocol = $mask_proxy_protocol
+TOML
+
+    # PATCH 3.3.30: mask_host — write only when explicitly set (null = binary uses tls_domain)
+    [ -n "$mask_host" ] && echo "mask_host = \"$mask_host\"" >> "$TMP_CONF"
+
+    cat <<TOML >> "$TMP_CONF"
 tls_emulation = true
 tls_front_dir = "/var/etc/telemt_tlsfront"
 fake_cert_len = $fake_cert_len
@@ -459,7 +475,7 @@ TOML
     local has_upstreams=0
     handle_upstream() {
         local s="$1"
-        local u_en u_type u_addr u_user u_pass u_weight u_scopes u_interface
+        local u_en u_type u_addr u_user u_pass u_weight u_scopes u_interface u_url
 
         config_get_bool u_en "$s" enabled 1
         [ "$u_en" -ne 1 ] && return
@@ -469,7 +485,11 @@ TOML
         config_get u_scopes "$s" scopes ""
         config_get u_interface "$s" interface ""
 
-        if [ "$u_type" != "direct" ]; then
+        # PATCH 3.3.30: shadowsocks upstream uses 'url' (SIP002 format) instead of 'address'
+        if [ "$u_type" = "shadowsocks" ]; then
+            config_get u_url "$s" url ""
+            [ -z "$u_url" ] && return
+        elif [ "$u_type" != "direct" ]; then
             config_get u_addr "$s" address ""
             [ -z "$u_addr" ] && return
         fi
@@ -481,7 +501,11 @@ TOML
 
         [ -n "$u_scopes" ] && echo "scopes = \"$(sanitize_toml_value "$u_scopes")\"" >> "$TMP_CONF"
 
-        if [ "$u_type" != "direct" ]; then
+        if [ "$u_type" = "shadowsocks" ]; then
+            # Shadowsocks: url field (SIP002), no username/password
+            echo "url = \"$(sanitize_toml_value "$u_url")\"" >> "$TMP_CONF"
+            [ -n "$u_interface" ] && echo "interface = \"$(sanitize_toml_value "$u_interface")\"" >> "$TMP_CONF"
+        elif [ "$u_type" != "direct" ]; then
             config_get u_user "$s" username ""
             config_get u_pass "$s" password ""
             echo "address = \"$(sanitize_toml_value "$u_addr")\"" >> "$TMP_CONF"

@@ -1,4 +1,4 @@
-name: Build and Release TorrServer for OpenWrt v2
+name: Build and Release TorrServer for OpenWrt v3
 
 on:
   push:
@@ -29,9 +29,9 @@ jobs:
 
     env:
       PKG_NAME: torrserver
-      BIN_NAME: TorrServer
-      OUT_BIN: TorrServer-linux-arm64-openwrt
-      OUT_BIN_UPX: TorrServer-linux-arm64-openwrt-upx
+      BIN_NAME: torrserver
+      OUT_BIN: torrserver-linux-arm64-openwrt
+      OUT_BIN_UPX: torrserver-linux-arm64-openwrt-upx
       UPSTREAM_REPO: YouROK/TorrServer
       DEFAULT_ARCH: aarch64_cortex-a53
 
@@ -259,7 +259,7 @@ jobs:
           STOP=10
           USE_PROCD=1
 
-          PROG="/usr/bin/TorrServer"
+          PROG="/usr/bin/torrserver"
           CFG="torrserver"
 
           . /lib/functions.sh
@@ -349,10 +349,15 @@ jobs:
           }
           EOF
 
+          cat > "${PKGROOT}/conffiles" <<'EOF'
+          /etc/config/torrserver
+          EOF
+
           chmod 0755 "${PKGROOT}/etc/init.d/torrserver"
           dos2unix \
             "${PKGROOT}/etc/config/torrserver" \
-            "${PKGROOT}/etc/init.d/torrserver"
+            "${PKGROOT}/etc/init.d/torrserver" \
+            "${PKGROOT}/conffiles"
 
       - name: Create nFPM configs and packages
         shell: bash
@@ -369,6 +374,7 @@ jobs:
 
           /etc/init.d/torrserver enable >/dev/null 2>&1 || true
           /etc/init.d/torrserver restart >/dev/null 2>&1 || /etc/init.d/torrserver start >/dev/null 2>&1 || true
+
           exit 0
           EOF
 
@@ -380,10 +386,20 @@ jobs:
 
           /etc/init.d/torrserver stop >/dev/null 2>&1 || true
           /etc/init.d/torrserver disable >/dev/null 2>&1 || true
+
           exit 0
           EOF
 
-          chmod 0755 packaging/postinstall.sh packaging/preremove.sh
+          cat > packaging/postremove.sh <<'EOF'
+          #!/bin/sh
+          set -e
+          exit 0
+          EOF
+
+          chmod 0755 \
+            packaging/postinstall.sh \
+            packaging/preremove.sh \
+            packaging/postremove.sh
 
           export SOURCE_DATE_EPOCH=1704067200
 
@@ -428,9 +444,16 @@ jobs:
                 mode: 0644
                 mtime: 2024-01-01T00:00:00Z
 
+            - src: ./pkgroot/conffiles
+              dst: /lib/upgrade/keep.d/torrserver
+              file_info:
+                mode: 0644
+                mtime: 2024-01-01T00:00:00Z
+
           scripts:
             postinstall: ./packaging/postinstall.sh
             preremove: ./packaging/preremove.sh
+            postremove: ./packaging/postremove.sh
           EOF
 
             nfpm package --config nfpm_ipk.yaml --packager ipk --target "${target}"
@@ -474,8 +497,8 @@ jobs:
           name: ${{ env.RELEASE_NAME }}
           files: |
             *.ipk
-            TorrServer-linux-arm64-openwrt
-            TorrServer-linux-arm64-openwrt-upx
+            torrserver-linux-arm64-openwrt
+            torrserver-linux-arm64-openwrt-upx
             SHA256SUMS.txt
           draft: false
           prerelease: false

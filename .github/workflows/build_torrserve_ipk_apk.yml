@@ -1,4 +1,4 @@
-name: Build and Release TorrServer for OpenWrt
+name: Build and Release TorrServer for OpenWrt v2
 
 on:
   push:
@@ -30,7 +30,6 @@ jobs:
     env:
       PKG_NAME: torrserver
       BIN_NAME: TorrServer
-      SERVICE_NAME: torrserver
       OUT_BIN: TorrServer-linux-arm64-openwrt
       OUT_BIN_UPX: TorrServer-linux-arm64-openwrt-upx
       UPSTREAM_REPO: YouROK/TorrServer
@@ -60,7 +59,7 @@ jobs:
           if [[ -z "${REQUESTED_REF}" || "${REQUESTED_REF}" == "latest" ]]; then
             REQUESTED_REF="$(git ls-remote --refs --tags "${REPO_URL}" \
               | awk -F/ '{print $3}' \
-              | grep -E '^(MatriX|v)[0-9]' \
+              | grep -E '^MatriX\.[0-9]+' \
               | sort -V \
               | tail -n 1)"
           fi
@@ -70,27 +69,48 @@ jobs:
             exit 1
           fi
 
-          VERSION="${REQUESTED_REF}"
-          SAFE_VERSION="${VERSION#v}"
+          if git ls-remote --exit-code --tags "${REPO_URL}" "refs/tags/${REQUESTED_REF}" >/dev/null 2>&1; then
+            DISPLAY_VERSION="${REQUESTED_REF}"
 
-          if [[ "${REQUESTED_REF}" =~ ^(MatriX[0-9]+([.][0-9]+)*)$ || "${REQUESTED_REF}" =~ ^v?[0-9]+([.][0-9]+)*([.-].*)?$ ]]; then
+            case "${REQUESTED_REF}" in
+              MatriX.*)
+                PKG_VERSION="${REQUESTED_REF#MatriX.}"
+                ;;
+              v*)
+                PKG_VERSION="${REQUESTED_REF#v}"
+                ;;
+              *)
+                PKG_VERSION="${REQUESTED_REF}"
+                ;;
+            esac
+
             RELEASE_TAG="${REQUESTED_REF}"
-            RELEASE_NAME="TorrServer ${REQUESTED_REF} OpenWrt"
+            RELEASE_NAME="TorrServer ${DISPLAY_VERSION} OpenWrt"
           else
-            SAFE_VERSION="0.0.0-dev.${GITHUB_RUN_NUMBER}"
-            RELEASE_TAG="torrserver-${SAFE_VERSION}-${GITHUB_RUN_NUMBER}"
-            RELEASE_NAME="TorrServer ${SAFE_VERSION} OpenWrt"
+            DISPLAY_VERSION="dev-${GITHUB_RUN_NUMBER}"
+            PKG_VERSION="0.0.0-dev.${GITHUB_RUN_NUMBER}"
+            RELEASE_TAG="torrserver-${PKG_VERSION}-${GITHUB_RUN_NUMBER}"
+            RELEASE_NAME="TorrServer ${DISPLAY_VERSION} OpenWrt"
           fi
 
           {
             echo "REQUESTED_REF=${REQUESTED_REF}"
-            echo "VERSION=${VERSION}"
-            echo "SAFE_VERSION=${SAFE_VERSION}"
+            echo "DISPLAY_VERSION=${DISPLAY_VERSION}"
+            echo "PKG_VERSION=${PKG_VERSION}"
             echo "RELEASE_TAG=${RELEASE_TAG}"
             echo "RELEASE_NAME=${RELEASE_NAME}"
             echo "PKG_ARCH=${PKG_ARCH}"
             echo "USE_UPX_INPUT=${USE_UPX_INPUT}"
           } >> "${GITHUB_ENV}"
+
+          echo "Resolved:"
+          echo "  REQUESTED_REF=${REQUESTED_REF}"
+          echo "  DISPLAY_VERSION=${DISPLAY_VERSION}"
+          echo "  PKG_VERSION=${PKG_VERSION}"
+          echo "  RELEASE_TAG=${RELEASE_TAG}"
+          echo "  RELEASE_NAME=${RELEASE_NAME}"
+          echo "  PKG_ARCH=${PKG_ARCH}"
+          echo "  USE_UPX_INPUT=${USE_UPX_INPUT}"
 
       - name: Clone upstream repository
         shell: bash
@@ -206,20 +226,20 @@ jobs:
 
           mkdir -p \
             "${PKGROOT}/etc/config" \
-            "${PKGROOT}/etc/init.d" \
-            "${PKGROOT}/usr/bin"
+            "${PKGROOT}/etc/init.d"
 
           cat > "${PKGROOT}/etc/config/torrserver" <<'EOF'
           config torrserver 'main'
               option enabled '1'
               option port '8090'
-              option ip ''
               option path '/opt/torrserver'
+              option proxymode 'tracker'
+              option dontkill '1'
+              option httpauth '0'
+              option rdb '0'
+              option ip ''
               option logpath ''
               option weblogpath ''
-              option rdb '0'
-              option httpauth '0'
-              option dontkill '0'
               option torrentsdir ''
               option torrentaddr ''
               option pubipv4 ''
@@ -230,7 +250,6 @@ jobs:
               option fuse ''
               option webdav '0'
               option proxyurl ''
-              option proxymode 'tracker'
           EOF
 
           cat > "${PKGROOT}/etc/init.d/torrserver" <<'EOF'
@@ -262,23 +281,25 @@ jobs:
           }
 
           start_service() {
-              local enabled port ip path logpath weblogpath
-              local rdb httpauth dontkill torrentsdir torrentaddr
+              local enabled port path proxymode dontkill httpauth rdb
+              local ip logpath weblogpath torrentsdir torrentaddr
               local pubipv4 pubipv6 searchwa maxsize tg fuse
-              local webdav proxyurl proxymode
+              local webdav proxyurl
 
               config_load "$CFG"
               config_get_bool enabled main enabled 1
               [ "$enabled" -eq 1 ] || return 0
 
               config_get port main port '8090'
-              config_get ip main ip ''
               config_get path main path '/opt/torrserver'
+              config_get proxymode main proxymode 'tracker'
+              config_get_bool dontkill main dontkill 1
+              config_get_bool httpauth main httpauth 0
+              config_get_bool rdb main rdb 0
+
+              config_get ip main ip ''
               config_get logpath main logpath ''
               config_get weblogpath main weblogpath ''
-              config_get_bool rdb main rdb 0
-              config_get_bool httpauth main httpauth 0
-              config_get_bool dontkill main dontkill 0
               config_get torrentsdir main torrentsdir ''
               config_get torrentaddr main torrentaddr ''
               config_get pubipv4 main pubipv4 ''
@@ -289,7 +310,6 @@ jobs:
               config_get fuse main fuse ''
               config_get_bool webdav main webdav 0
               config_get proxyurl main proxyurl ''
-              config_get proxymode main proxymode 'tracker'
 
               mkdir -p "$path"
 
@@ -297,8 +317,9 @@ jobs:
               procd_set_param command "$PROG"
 
               append_arg "$port" --port
-              append_arg "$ip" --ip
               append_arg "$path" --path
+              append_arg "$proxymode" --proxymode
+              append_arg "$ip" --ip
               append_arg "$logpath" --logpath
               append_arg "$weblogpath" --weblogpath
               append_arg "$torrentsdir" --torrentsdir
@@ -309,14 +330,14 @@ jobs:
               append_arg "$tg" --tg
               append_arg "$fuse" --fuse
               append_arg "$proxyurl" --proxyurl
-              append_arg "$proxymode" --proxymode
 
-              append_bool_flag "$rdb" --rdb
-              append_bool_flag "$httpauth" --httpauth
               append_bool_flag "$dontkill" --dontkill
+              append_bool_flag "$httpauth" --httpauth
+              append_bool_flag "$rdb" --rdb
               append_bool_flag "$searchwa" --searchwa
               append_bool_flag "$webdav" --webdav
 
+              procd_set_param term_timeout 5
               procd_set_param respawn 3600 5 5
               procd_set_param stdout 1
               procd_set_param stderr 1
@@ -375,7 +396,7 @@ jobs:
           name: ${pkg_name}
           arch: ${PKG_ARCH}
           platform: linux
-          version: ${SAFE_VERSION}
+          version: ${PKG_VERSION}
           section: net
           priority: optional
           maintainer: ${GITHUB_REPOSITORY_OWNER}
@@ -415,34 +436,35 @@ jobs:
             nfpm package --config nfpm_ipk.yaml --packager ipk --target "${target}"
           }
 
-          make_nfpm "${PKG_NAME}" "${OUT_BIN}" "${PKG_NAME}_${SAFE_VERSION}_${PKG_ARCH}.ipk"
+          make_nfpm "${PKG_NAME}" "${OUT_BIN}" "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.ipk"
 
           if [[ "${USE_UPX_INPUT}" == "true" ]]; then
-            make_nfpm "${PKG_NAME}-upx" "${OUT_BIN_UPX}" "${PKG_NAME}-upx_${SAFE_VERSION}_${PKG_ARCH}.ipk"
+            make_nfpm "${PKG_NAME}-upx" "${OUT_BIN_UPX}" "${PKG_NAME}-upx_${PKG_VERSION}_${PKG_ARCH}.ipk"
           fi
 
       - name: Generate checksums
         shell: bash
         run: |
           set -euxo pipefail
-          sha256sum "${OUT_BIN}" *.ipk > SHA256SUMS.txt
+
+          rm -f SHA256SUMS.txt
+          sha256sum "${OUT_BIN}" >> SHA256SUMS.txt
+          sha256sum *.ipk >> SHA256SUMS.txt
+
           if [[ "${USE_UPX_INPUT}" == "true" ]]; then
             sha256sum "${OUT_BIN_UPX}" >> SHA256SUMS.txt
           fi
+
           cat SHA256SUMS.txt
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: torrserver-openwrt-${{ env.SAFE_VERSION }}
+          name: torrserver-openwrt-${{ env.PKG_VERSION }}
           path: |
             *.ipk
-            ${{
-              env.OUT_BIN
-            }}
-            ${{
-              env.OUT_BIN_UPX
-            }}
+            ${{ env.OUT_BIN }}
+            ${{ env.OUT_BIN_UPX }}
             SHA256SUMS.txt
 
       - name: GitHub Release

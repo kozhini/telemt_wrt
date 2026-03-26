@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Package version, e.g. 1.1112'
+        description: 'Package version, e.g. 1.2'
         required: true
-        default: '1.1112'
+        default: '1.2'
 
 jobs:
   release:
@@ -577,15 +577,25 @@ jobs:
           echo ""
           echo "============================================================"
           echo " Installed ${PKG_NAME} version ${PKG_VERSION}"
-          echo " This package is a LuCI companion for the TorrServer daemon."
-          echo " Required daemon package: torrserver"
-          echo " Menu path: Services -> TorrServer"
+          echo " This package is only a LuCI companion."
+          echo " Expected daemon binary : /usr/bin/torrserver"
+          echo " Expected init script   : /etc/init.d/torrserver"
+          echo " If the web UI does not work, install your TorrServer daemon"
+          echo " package first (standard or upx variant)."
           echo "============================================================"
 
           [ -n "\${IPKG_INSTROOT}" ] && exit 0
 
           rm -f /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null || true
           /etc/init.d/uhttpd reload >/dev/null 2>&1 || true
+
+          if [ ! -x /usr/bin/torrserver ]; then
+              echo "[postinstall] warning: /usr/bin/torrserver not found"
+          fi
+
+          if [ ! -x /etc/init.d/torrserver ]; then
+              echo "[postinstall] warning: /etc/init.d/torrserver not found"
+          fi
 
           echo "[postinstall] LuCI cache cleared."
           echo "[postinstall] done."
@@ -633,8 +643,7 @@ jobs:
           export PKG_DESC="Simple LuCI web interface for managing TorrServer on OpenWrt"
 
           make_nfpm_yaml() {
-            local fmt="$1"
-            local yaml_path="$2"
+            local yaml_path="$1"
 
             cat > "${yaml_path}" <<EOF
           name: ${PKG_NAME}
@@ -651,7 +660,6 @@ jobs:
           depends:
             - luci-base
             - luci-compat
-            - torrserver
 
           contents:
             - src: ./root/usr/lib/lua/luci/controller/torrserver.lua
@@ -673,11 +681,11 @@ jobs:
           EOF
           }
 
-          make_nfpm_yaml "ipk" "nfpm_ipk.yaml"
+          make_nfpm_yaml "nfpm_ipk.yaml"
           nfpm package --config nfpm_ipk.yaml --packager ipk --target "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.ipk"
           test -f "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.ipk"
 
-          make_nfpm_yaml "apk" "nfpm_apk.yaml"
+          make_nfpm_yaml "nfpm_apk.yaml"
           nfpm package --config nfpm_apk.yaml --packager apk --target "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.apk"
           test -f "${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.apk"
 

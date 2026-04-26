@@ -42,10 +42,10 @@ jobs:
         run: |
           set -euxo pipefail
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VERSION="${{ github.event.inputs.build_target }}"
-          elif [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_call" ]]; then
             VERSION="${{ inputs.build_target }}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.build_target }}"
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
           else

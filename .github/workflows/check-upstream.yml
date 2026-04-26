@@ -23,29 +23,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Берём все теги upstream, фильтруем по паттерну 3.3.* или [4-9]*
-          UPSTREAM_TAG=$(gh release list --repo telemt/telemt --limit 50 --json tagName \
-            | jq -r '.[].tagName' \
-            | grep -E '^(3\.3\.[0-9]+|[4-9].*)$' \
-            | sort -V \
-            | tail -n1)
+          UPSTREAM_TAG=$(gh release list --repo telemt/telemt --limit 100 --json tagName,isLatest \
+            | jq -r '.[] | select(.isLatest == true) | .tagName')
 
           echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
           echo "Upstream latest: ${UPSTREAM_TAG}"
 
-      - name: Get latest upstream tag
-        id: upstream
+      - name: Get latest local tag
+        id: local
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
 
-          UPSTREAM_TAG=$(gh release list --repo telemt/telemt --limit 100 --json tagName,isLatest \
-            | jq -r '.[] | select(.isLatest == true) | .tagName')
+          LOCAL_TAG=$(gh release list --repo ${{ github.repository }} --limit 100 --json tagName,isLatest \
+            | jq -r '.[] | select(.isLatest == true) | .tagName' || echo "")
 
-          echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
-          echo "Upstream latest: ${UPSTREAM_TAG}"
+          echo "local_tag=${LOCAL_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Local latest: ${LOCAL_TAG}"
 
       - name: Compare versions
         id: compare

@@ -33,23 +33,19 @@ jobs:
           echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
           echo "Upstream latest: ${UPSTREAM_TAG}"
 
-      - name: Get latest local tag
-        id: local
+      - name: Get latest upstream tag
+        id: upstream
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
 
-          # Берём последний релиз из нашего репо с таким же фильтром
-          LOCAL_TAG=$(gh release list --repo ${{ github.repository }} --limit 50 --json tagName \
-            | jq -r '.[].tagName' \
-            | grep -E '^(3\.3\.[0-9]+|[4-9].*)$' \
-            | sort -V \
-            | tail -n1 || echo "")
+          UPSTREAM_TAG=$(gh release list --repo telemt/telemt --limit 100 --json tagName,isLatest \
+            | jq -r '.[] | select(.isLatest == true) | .tagName')
 
-          echo "local_tag=${LOCAL_TAG}" >> "$GITHUB_OUTPUT"
-          echo "Local latest: ${LOCAL_TAG}"
+          echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest: ${UPSTREAM_TAG}"
 
       - name: Compare versions
         id: compare

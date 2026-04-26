@@ -1,0 +1,85 @@
+name: Check Upstream and Auto-Build
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # каждые 24ч в 06:00 UTC
+  workflow_dispatch:       # ручной запуск для теста
+
+jobs:
+  check:
+    name: Check upstream version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      new_version: ${{ steps.compare.outputs.new_version }}
+
+    steps:
+      - name: Get latest upstream tag
+        id: upstream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Берём все теги upstream, фильтруем по паттерну 3.3.* или [4-9]*
+          UPSTREAM_TAG=$(gh release list --repo telemt/telemt --limit 50 --json tagName \
+            | jq -r '.[].tagName' \
+            | grep -E '^(3\.3\.[0-9]+|[4-9].*)$' \
+            | sort -V \
+            | tail -n1)
+
+          echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest: ${UPSTREAM_TAG}"
+
+      - name: Get latest local tag
+        id: local
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Берём последний релиз из нашего репо с таким же фильтром
+          LOCAL_TAG=$(gh release list --repo ${{ github.repository }} --limit 50 --json tagName \
+            | jq -r '.[].tagName' \
+            | grep -E '^(3\.3\.[0-9]+|[4-9].*)$' \
+            | sort -V \
+            | tail -n1 || echo "")
+
+          echo "local_tag=${LOCAL_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Local latest: ${LOCAL_TAG}"
+
+      - name: Compare versions
+        id: compare
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          UPSTREAM="${{ steps.upstream.outputs.upstream_tag }}"
+          LOCAL="${{ steps.local.outputs.local_tag }}"
+
+          echo "Upstream: ${UPSTREAM}"
+          echo "Local:    ${LOCAL}"
+
+          if [[ -z "${UPSTREAM}" ]]; then
+            echo "No matching upstream tag found, skipping"
+            echo "new_version=" >> "$GITHUB_OUTPUT"
+          elif [[ "${UPSTREAM}" == "${LOCAL}" ]]; then
+            echo "Already up to date (${LOCAL}), skipping"
+            echo "new_version=" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version available: ${UPSTREAM} (local: ${LOCAL:-none})"
+            echo "new_version=${UPSTREAM}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build new version
+    needs: check
+    if: needs.check.outputs.new_version != ''
+    uses: ./.github/workflows/telemt-release-aarch64-upx.yml
+    with:
+      build_target: ${{ needs.check.outputs.new_version }}
+    permissions:
+      contents: write

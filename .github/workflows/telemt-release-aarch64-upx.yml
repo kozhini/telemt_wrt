@@ -1,4 +1,4 @@
-name: Build and Release Headless Telemt (aarch64 build + x86_64 upstream)
+name: Build and Release Headless Telemt (aarch64_cortex-a53)
 
 on:
   push:
@@ -11,6 +11,12 @@ on:
         description: 'Enter tag (e.g. 3.3.35) or branch (main)'
         required: true
         default: '3.3.35'
+  workflow_call:
+    inputs:
+      build_target:
+        description: 'Tag to build (called from check-upstream workflow)'
+        required: true
+        type: string
 
 jobs:
   release:
@@ -27,12 +33,7 @@ jobs:
       AARCH64_TARGET: aarch64-unknown-linux-musl
       AARCH64_OUT_BIN: telemt-aarch64-musl
 
-      X86_64_ASSET_NAME: telemt-x86_64-linux-musl.tar.gz
-      X86_64_ASSET_SHA256_NAME: telemt-x86_64-linux-musl.tar.gz.sha256
-      X86_64_OUT_BIN: telemt-x86_64-musl
-
-      PKG_ARCH_AARCH64S: aarch64_generic aarch64_cortex-a53
-      PKG_ARCH_X86_64: x86_64
+      PKG_ARCH: aarch64_cortex-a53
 
     steps:
       - name: Extract version
@@ -43,6 +44,8 @@ jobs:
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             VERSION="${{ github.event.inputs.build_target }}"
+          elif [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            VERSION="${{ inputs.build_target }}"
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
           else
@@ -116,49 +119,6 @@ jobs:
           printf "\nMTProxy v%s\n" "${VERSION}" >> "${AARCH64_OUT_BIN}"
           chmod 0755 "${AARCH64_OUT_BIN}"
           file "${AARCH64_OUT_BIN}" || true
-
-      - name: Download upstream x86_64 release asset
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p upstream_release
-
-          gh release download "${TAG}" \
-            --repo "${UPSTREAM_REPO}" \
-            --pattern "${X86_64_ASSET_NAME}" \
-            --pattern "${X86_64_ASSET_SHA256_NAME}" \
-            --dir upstream_release
-
-          test -f "upstream_release/${X86_64_ASSET_NAME}"
-          test -f "upstream_release/${X86_64_ASSET_SHA256_NAME}"
-
-      - name: Verify upstream x86_64 archive checksum
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd upstream_release
-          sha256sum -c "${X86_64_ASSET_SHA256_NAME}"
-
-      - name: Extract x86_64 binary from upstream asset
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p extracted_x86_64
-          tar -xzf "upstream_release/${X86_64_ASSET_NAME}" -C extracted_x86_64
-
-          BIN_PATH="$(find extracted_x86_64 -type f -name telemt | head -n1)"
-          test -n "${BIN_PATH}"
-          test -f "${BIN_PATH}"
-
-          install -m 0755 "${BIN_PATH}" "${X86_64_OUT_BIN}"
-          printf "\nMTProxy v%s\n" "${VERSION}" >> "${X86_64_OUT_BIN}"
-          chmod 0755 "${X86_64_OUT_BIN}"
-          file "${X86_64_OUT_BIN}" || true
 
       - name: Fix CRLF line endings in scripts
         shell: bash
@@ -239,10 +199,9 @@ jobs:
 
           export SOURCE_DATE_EPOCH=1704067200
 
-          for ARCH in ${PKG_ARCH_AARCH64S}; do
-            cat > nfpm_ipk_${ARCH}.yaml <<EOF
+          cat > nfpm_ipk.yaml <<EOF
           name: ${PKG_NAME}
-          arch: ${ARCH}
+          arch: ${PKG_ARCH}
           platform: linux
           version: ${VERSION}
           section: net
@@ -272,62 +231,21 @@ jobs:
             postremove: ./postrm.sh
           EOF
 
-            nfpm package \
-              --config nfpm_ipk_${ARCH}.yaml \
-              --packager ipk \
-              --target "${PKG_NAME}_${VERSION}_${ARCH}.ipk"
-
-            test -f "${PKG_NAME}_${VERSION}_${ARCH}.ipk"
-          done
-
-          cat > nfpm_ipk_${PKG_ARCH_X86_64}.yaml <<EOF
-          name: ${PKG_NAME}
-          arch: ${PKG_ARCH_X86_64}
-          platform: linux
-          version: ${VERSION}
-          section: net
-          priority: optional
-          maintainer: Telemt Team
-          description: "${PKG_DESC}"
-          contents:
-            - src: ./${X86_64_OUT_BIN}
-              dst: /usr/bin/telemt
-              file_info:
-                mode: 0755
-                mtime: 2024-01-01T00:00:00Z
-            - src: ./files/telemt.init
-              dst: /etc/init.d/telemt
-              file_info:
-                mode: 0755
-                mtime: 2024-01-01T00:00:00Z
-            - src: ./files/telemt.config
-              dst: /etc/config/telemt
-              type: config
-              file_info:
-                mode: 0644
-                mtime: 2024-01-01T00:00:00Z
-          scripts:
-            postinstall: ./postinst.sh
-            preremove: ./prerm.sh
-            postremove: ./postrm.sh
-          EOF
-
           nfpm package \
-            --config nfpm_ipk_${PKG_ARCH_X86_64}.yaml \
+            --config nfpm_ipk.yaml \
             --packager ipk \
-            --target "${PKG_NAME}_${VERSION}_${PKG_ARCH_X86_64}.ipk"
+            --target "${PKG_NAME}_${VERSION}_${PKG_ARCH}.ipk"
 
-          test -f "${PKG_NAME}_${VERSION}_${PKG_ARCH_X86_64}.ipk"
+          test -f "${PKG_NAME}_${VERSION}_${PKG_ARCH}.ipk"
 
       - name: Build APK packages
         shell: bash
         run: |
           set -euxo pipefail
 
-          for ARCH in ${PKG_ARCH_AARCH64S}; do
-            cat > nfpm_apk_${ARCH}.yaml <<EOF
+          cat > nfpm_apk.yaml <<EOF
           name: ${PKG_NAME}
-          arch: ${ARCH}
+          arch: ${PKG_ARCH}
           platform: linux
           version: ${VERSION}
           maintainer: Telemt Team
@@ -352,54 +270,17 @@ jobs:
             postremove: ./postrm.sh
           EOF
 
-            nfpm package \
-              --config nfpm_apk_${ARCH}.yaml \
-              --packager apk \
-              --target "${PKG_NAME}_${VERSION}_${ARCH}.apk"
-
-            test -f "${PKG_NAME}_${VERSION}_${ARCH}.apk"
-          done
-
-          cat > nfpm_apk_${PKG_ARCH_X86_64}.yaml <<EOF
-          name: ${PKG_NAME}
-          arch: ${PKG_ARCH_X86_64}
-          platform: linux
-          version: ${VERSION}
-          maintainer: Telemt Team
-          description: "${PKG_DESC}"
-          contents:
-            - src: ./${X86_64_OUT_BIN}
-              dst: /usr/bin/telemt
-              file_info:
-                mode: 0755
-            - src: ./files/telemt.init
-              dst: /etc/init.d/telemt
-              file_info:
-                mode: 0755
-            - src: ./files/telemt.config
-              dst: /etc/config/telemt
-              type: config
-              file_info:
-                mode: 0644
-          scripts:
-            postinstall: ./postinst.sh
-            preremove: ./prerm.sh
-            postremove: ./postrm.sh
-          EOF
-
           nfpm package \
-            --config nfpm_apk_${PKG_ARCH_X86_64}.yaml \
+            --config nfpm_apk.yaml \
             --packager apk \
-            --target "${PKG_NAME}_${VERSION}_${PKG_ARCH_X86_64}.apk"
+            --target "${PKG_NAME}_${VERSION}_${PKG_ARCH}.apk"
 
-          test -f "${PKG_NAME}_${VERSION}_${PKG_ARCH_X86_64}.apk"
+          test -f "${PKG_NAME}_${VERSION}_${PKG_ARCH}.apk"
 
       - name: Show built files
         shell: bash
         run: |
           set -euxo pipefail
-          ls -la
-          echo
           echo "IPK:"
           ls -la *.ipk
           echo
@@ -407,10 +288,10 @@ jobs:
           ls -la *.apk
           echo
           echo "BIN:"
-          ls -la "${AARCH64_OUT_BIN}" "${X86_64_OUT_BIN}"
+          ls -la "${AARCH64_OUT_BIN}"
 
       - name: Fetch upstream release notes
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -428,7 +309,7 @@ jobs:
           fi
 
       - name: Create or update GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -444,14 +325,12 @@ jobs:
 
             gh release upload "${TAG}" \
               "${AARCH64_OUT_BIN}" \
-              "${X86_64_OUT_BIN}" \
               *.ipk \
               *.apk \
               --clobber
           else
             gh release create "${TAG}" \
               "${AARCH64_OUT_BIN}" \
-              "${X86_64_OUT_BIN}" \
               *.ipk \
               *.apk \
               --title "${TITLE}" \

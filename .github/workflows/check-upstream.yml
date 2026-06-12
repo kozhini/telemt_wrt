@@ -23,8 +23,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          UPSTREAM_TAG=$(gh release list --repo telemt/telemt --limit 100 --json tagName,isLatest \
-            | jq -r '.[] | select(.isLatest == true) | .tagName')
+          UPSTREAM_TAG=$(gh release list --repo telemt/telemt --limit 100 --json tagName \
+            | jq -r '.[].tagName' \
+            | grep -E '^(3\.[3-9]\.[0-9]+.*|[4-9].*)' \
+            | sort -V \
+            | tail -n1)
 
           echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
           echo "Upstream latest: ${UPSTREAM_TAG}"
@@ -37,8 +40,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          LOCAL_TAG=$(gh release list --repo ${{ github.repository }} --limit 100 --json tagName,isLatest \
-            | jq -r '.[] | select(.isLatest == true) | .tagName' || echo "")
+          LOCAL_TAG=$(gh release list --repo ${{ github.repository }} --limit 100 --json tagName \
+            | jq -r '.[].tagName' \
+            | grep -E '^(3\.[3-9]\.[0-9]+.*|[4-9].*)' \
+            | sort -V \
+            | tail -n1 || echo "")
 
           echo "local_tag=${LOCAL_TAG}" >> "$GITHUB_OUTPUT"
           echo "Local latest: ${LOCAL_TAG}"
